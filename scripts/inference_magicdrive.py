@@ -87,7 +87,7 @@ def set_omegaconf_key_value(cfg, key, value):
         node = getattr(node, pk)
     node[m] = value
 
-    
+
 def main():
     torch.set_grad_enabled(False)
     # ======================================================
@@ -165,8 +165,14 @@ def main():
     # == init distributed env ==
     if is_distributed():
         # colossalai.launch_from_torch({})
-        dist.init_process_group(backend="nccl", timeout=timedelta(hours=1))
-        torch.cuda.set_device(dist.get_rank() % torch.cuda.device_count())
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        torch.cuda.set_device(local_rank)
+
+        dist.init_process_group(
+            backend="nccl",
+            timeout=timedelta(hours=1),
+            device_id=torch.device(f"cuda:{local_rank}"),
+        )
         cfg.sp_size = dist.get_world_size()
     else:
         dist.init_process_group(
@@ -512,7 +518,7 @@ def main():
                         )
                 del video_clips
                 coordinator.block_all()
-            
+
             # save_gt
             if is_main_process() and not cfg.ignore_ori_imgs:
                 torch.cuda.empty_cache()

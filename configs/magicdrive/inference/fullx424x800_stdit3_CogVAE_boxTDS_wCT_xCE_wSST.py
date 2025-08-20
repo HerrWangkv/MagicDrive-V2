@@ -1,9 +1,7 @@
 fps = 12
 frame_interval = 1
 save_fps = 12
-validation_index = [
-    122,  # full
-]
+validation_index = list(range(150))
 num_sample = 1
 
 batch_size = 1
@@ -50,7 +48,7 @@ grad_checkpoint = False
 drop_cond_ratio = 0.15
 
 # Acceleration settings
-num_workers = 4
+num_workers = 0
 num_bucket_build_workers = 16
 
 # Model settings
