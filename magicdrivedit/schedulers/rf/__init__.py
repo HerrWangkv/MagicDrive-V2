@@ -225,6 +225,7 @@ class RFLOW_SLICE_REPAINT(RFLOW):
         model,
         text_encoder,
         z,
+        ignore_mask_timestep,
         prompts,
         device,
         neg_prompts=None,
@@ -314,7 +315,7 @@ class RFLOW_SLICE_REPAINT(RFLOW):
             dt = dt / self.num_timesteps
             z = z + v_pred * dt[:, None, None, None, None]
 
-            if mask is not None:
+            if mask is not None and t[0] >= ignore_mask_timestep * self.num_timesteps:
                 next_t = (
                     timesteps[i + 1]
                     if i < len(timesteps) - 1

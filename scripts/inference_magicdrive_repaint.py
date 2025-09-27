@@ -648,6 +648,7 @@ def main():
                             dtype=dtype,
                         )
                     ),
+                    ignore_mask_timestep=0.3,  # TODO: config this
                     prompts=batch_prompts,
                     neg_prompts=neg_prompts,
                     device=device,
