@@ -29,3 +29,4 @@ h5py>=3.8.0
 moviepy>=1.0.3
 nuscenes-devkit==1.1.11
 opencv-python==4.10.0.84
+av>=10.0.0
