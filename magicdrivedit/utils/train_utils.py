@@ -64,9 +64,9 @@ def run_brushnet_validation(
         bl_generator = torch.Generator("cpu").manual_seed(val_cfg.seed)
         B, T, NC = batch["pixel_values"].shape[:3]
         latent_size = vae.get_latent_size((T, *batch["pixel_values"].shape[-2:]))
-        x = batch.pop("pixel_values").to(device, dtype)
+        x = batch["pixel_values"].to(device, dtype)
         x = rearrange(x, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
-        human_mask = batch.pop("human_mask").to(device, dtype)
+        human_mask = batch["human_masks"].to(device, dtype)
         human_mask = rearrange(
             human_mask, "B T NC C ... -> (B NC) C T ..."
         )  # BxNC, C, T, H, W
@@ -75,7 +75,12 @@ def run_brushnet_validation(
         with torch.no_grad():
             x_human = vae.encode(x_human)
         human_mask = F.interpolate(human_mask, size=x_human.shape[-3:], mode="nearest")
-
+        x_human = rearrange(
+            x_human, "(B NC) C T ... -> B (C NC) T ...", NC=NC
+        )  # B, (C, NC), T, H, W
+        human_mask = rearrange(
+            human_mask, "(B NC) C T ... -> B (C NC) T ...", NC=NC
+        )  # B, (C, NC), T, H, W
         # == prepare batch prompts ==
         y = batch.pop("captions")[0]  # B, just take first frame
         maps = batch.pop("bev_map_with_aux").to(device, dtype)  # B, T, C, H, W
@@ -191,16 +196,28 @@ def run_brushnet_validation(
         # save_gt
         x = batch.pop("pixel_values").to(device, dtype)
         x = rearrange(x, "B T NC C ... -> B NC C T ...")  # BxNC, C, T, H, W
+        human_mask = batch.pop("human_masks").to(device, dtype)
+        human_mask = rearrange(
+            human_mask, "B T NC C ... -> B NC C T ..."
+        )  # BxNC, C, T, H, W
+
+        # Create human-only version with white background
+        x_human_only = torch.where(human_mask > 0.5, x, torch.ones_like(x))
+
         torch.cuda.empty_cache()
         logging.info("start gather gt ...")
         _samples = gather_tensors(x, pg=get_data_parallel_group())
+        _samples_human = gather_tensors(x_human_only, pg=get_data_parallel_group())
         logging.info("end gather gt ...")
         if coordinator.is_master():
             samples = []
+            samples_human = []
             fpss = []
-            for sample, fps in zip(_samples, _fpss):
+            for sample, sample_human, fps in zip(_samples, _samples_human, _fpss):
                 samples += [s.cpu() for s in sample]
+                samples_human += [s.cpu() for s in sample_human]
                 fpss += [int(_fps) for _fps in fps]
+            # Save original ground truth
             for idx, sample in enumerate(samples):
                 vid_sample = concat_6_views_pt(sample, oneline=False)
                 save_path = save_sample(
@@ -210,8 +227,20 @@ def run_brushnet_validation(
                     high_quality=True,
                     verbose=verbose >= 2,
                 )
+            # Save human-only with white background
+            for idx, sample in enumerate(samples_human):
+                vid_sample = concat_6_views_pt(sample, oneline=False)
+                save_path = save_sample(
+                    vid_sample,
+                    fps=save_fps if save_fps else fpss[idx],
+                    save_path=os.path.join(
+                        video_save_dir, f"gt_human_{total_num + idx:04d}"
+                    ),
+                    high_quality=True,
+                    verbose=verbose >= 2,
+                )
             total_num += len(samples)
-        del _samples, _fpss
+        del _samples, _samples_human, _fpss
         torch.cuda.synchronize()
         coordinator.block_all()
 

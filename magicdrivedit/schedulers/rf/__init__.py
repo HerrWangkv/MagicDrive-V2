@@ -214,7 +214,9 @@ class RFLOW_BRUSHNET(RFLOW):
             # classifier-free guidance
             z_in = torch.cat([z, z], 0)
             t = torch.cat([t, t], 0)
-            pred = model(z_in, z_inpaint, mask_inpaint, t, **model_args)
+            z_inpaint_in = torch.cat([z_inpaint, z_inpaint], 0)
+            mask_inpaint_in = torch.cat([mask_inpaint, mask_inpaint], 0)
+            pred = model(z_in, z_inpaint_in, mask_inpaint_in, t, **model_args)
             if pred.shape[1] == z_in.shape[1] * 2:
                 pred = pred.chunk(2, dim=1)[0]
             else:
