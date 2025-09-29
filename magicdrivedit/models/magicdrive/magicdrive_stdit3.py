@@ -65,6 +65,7 @@ class MultiViewSTDiT3Block(nn.Module):
         # multiview params
         is_control_block=False,
         use_st_cross_attn=False,
+        skip_cross_attn=False,
         skip_cross_view=False,
     ):
         super().__init__()
@@ -78,6 +79,7 @@ class MultiViewSTDiT3Block(nn.Module):
         if use_st_cross_attn:
             assert not enable_sequence_parallelism or not sequence_parallelism_temporal
         self.use_st_cross_attn = use_st_cross_attn
+        self.skip_cross_attn = skip_cross_attn
         self.skip_cross_view = skip_cross_view or self.temporal
         # `attn_cls` is for self-attn (only one input).
         if enable_sequence_parallelism:
@@ -102,11 +104,13 @@ class MultiViewSTDiT3Block(nn.Module):
             enable_xformers=enable_xformers,
             is_cross_attention=use_st_cross_attn,
         )
-
-        # TODO: if split on T, we should also split conditions.
-        # splits on `head_num` for conditions is performed in `SeqParallelMultiHeadCrossAttention`
-        _this_attn_cls = MultiHeadCrossAttention if sequence_parallelism_temporal else mha_cls
-        self.cross_attn = _this_attn_cls(hidden_size, num_heads)
+        if not self.skip_cross_attn:
+            # TODO: if split on T, we should also split conditions.
+            # splits on `head_num` for conditions is performed in `SeqParallelMultiHeadCrossAttention`
+            _this_attn_cls = (
+                MultiHeadCrossAttention if sequence_parallelism_temporal else mha_cls
+            )
+            self.cross_attn = _this_attn_cls(hidden_size, num_heads)
 
         self.norm2 = get_layernorm(hidden_size, eps=1e-6, affine=False, use_kernel=enable_layernorm_kernel)
         self.mlp = Mlp(
@@ -258,19 +262,20 @@ class MultiViewSTDiT3Block(nn.Module):
         ######################
         # cross attn
         ######################
-        assert mask is None
-        if y.shape[1] == 1:
-            x_c = self.cross_attn(x, y[:, 0], mask)
-        elif y.shape[1] == T:
-            x_c = rearrange(x, "B (T S) C -> (B T) S C", T=T, S=S)
-            y_c = rearrange(y, "B T L C -> (B T) L C", T=T)
-            x_c = self.cross_attn(x_c, y_c, mask)
-            x_c = rearrange(x_c, "(B T) S C -> B (T S) C", T=T, S=S)
-        else:
-            raise RuntimeError(f"unsupported y.shape[1] = {y.shape[1]}")
+        if not self.skip_cross_attn:
+            assert mask is None
+            if y.shape[1] == 1:
+                x_c = self.cross_attn(x, y[:, 0], mask)
+            elif y.shape[1] == T:
+                x_c = rearrange(x, "B (T S) C -> (B T) S C", T=T, S=S)
+                y_c = rearrange(y, "B T L C -> (B T) L C", T=T)
+                x_c = self.cross_attn(x_c, y_c, mask)
+                x_c = rearrange(x_c, "(B T) S C -> B (T S) C", T=T, S=S)
+            else:
+                raise RuntimeError(f"unsupported y.shape[1] = {y.shape[1]}")
 
-        # residual, we skip drop_path here
-        x = x + x_c
+            # residual, we skip drop_path here
+            x = x + x_c
 
         ######################
         # multi-view cross attention
@@ -386,6 +391,7 @@ class MagicDriveSTDiT3Config(PretrainedConfig):
         zero_and_train_embedder=None,
         only_train_base_blocks=False,
         only_train_temp_blocks=False,
+        only_train_brushnet_blocks=False,
         qk_norm_trainable=False,
         sequence_parallelism_temporal=False,
         control_depth=13,
@@ -402,6 +408,7 @@ class MagicDriveSTDiT3Config(PretrainedConfig):
         micro_frame_size=17,
         control_skip_cross_view=True,
         control_skip_temporal=True,
+        brushnet_skip_cross_attn=True,
         **kwargs,
     ):
         self.input_size = input_size
@@ -433,6 +440,7 @@ class MagicDriveSTDiT3Config(PretrainedConfig):
         self.zero_and_train_embedder = zero_and_train_embedder
         self.only_train_base_blocks = only_train_base_blocks
         self.only_train_temp_blocks = only_train_temp_blocks
+        self.only_train_brushnet_blocks = only_train_brushnet_blocks
         self.qk_norm_trainable = qk_norm_trainable
         self.enable_xformers = enable_xformers
         self.sequence_parallelism_temporal = sequence_parallelism_temporal
@@ -450,6 +458,7 @@ class MagicDriveSTDiT3Config(PretrainedConfig):
         self.micro_frame_size = micro_frame_size
         self.control_skip_cross_view = control_skip_cross_view
         self.control_skip_temporal = control_skip_temporal
+        self.brushnet_skip_cross_attn = brushnet_skip_cross_attn
         super().__init__(**kwargs)
 
 
@@ -652,7 +661,7 @@ class MagicDriveSTDiT3(PreTrainedModel):
                 # but train cross_attn! NOTE: we may not need this.
                 # for param in block.cross_attn.parameters():
                 #     param.requires_grad = True
-                
+
             if self.control_blocks_t is not None:
                 for block in self.control_blocks_t:
                     for param in block.parameters():
@@ -668,7 +677,7 @@ class MagicDriveSTDiT3(PreTrainedModel):
             # first freeze all
             for param in self.parameters():
                 param.requires_grad = False
-            
+
             # then open some
             if not config.only_train_temp_blocks:
                 for param in self.base_blocks_s.parameters():
@@ -680,10 +689,10 @@ class MagicDriveSTDiT3(PreTrainedModel):
             if self.control_blocks_t is not None:
                 for param in self.control_blocks_t.parameters():
                     param.requires_grad = True
-            
+
             # embedders
             # NOTE: embedder changed, do we need to change cross-attn in control
-            # blocks? 
+            # blocks?
             for mod in [
                 # self.camera_embedder,
                 self.frame_embedder,
@@ -733,13 +742,13 @@ class MagicDriveSTDiT3(PreTrainedModel):
                     param.requires_grad = True
                 block.scale_shift_table_mva.requires_grad = True
 
-        # control blocks        
+        # control blocks
         for param in self.control_blocks_s.parameters():
             param.requires_grad = True
         if self.control_blocks_t is not None:
             for param in self.control_blocks_t.parameters():
                 param.requires_grad = True
-        
+
         # embedders
         for mod in [
             self.camera_embedder,
@@ -1013,7 +1022,7 @@ class MagicDriveSTDiT3(PreTrainedModel):
         if drop_frame_mask is None:  # box & rel_pos
             drop_frame_mask = torch.ones((B, real_T), device=x.device, dtype=x.dtype)
         if False:
-        # if mv_order_map is None:
+            # if mv_order_map is None:
             NC = 1
         else:
             NC = len(mv_order_map)
@@ -1225,6 +1234,455 @@ class MagicDriveSTDiT3(PreTrainedModel):
         return x
 
 
+class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
+    def __init__(self, config: MagicDriveSTDiT3Config):
+        super().__init__(config)
+        drop_path = [x.item() for x in torch.linspace(0, config.drop_path, self.depth)]
+        self.brushnet_blocks_s = nn.ModuleList(
+            [
+                MultiViewSTDiT3Block(
+                    hidden_size=self.hidden_size,
+                    num_heads=self.num_heads,
+                    mlp_ratio=self.mlp_ratio,
+                    drop_path=drop_path[i],
+                    enable_flash_attn=self.enable_flash_attn,
+                    enable_xformers=self.enable_xformers,
+                    enable_layernorm_kernel=self.enable_layernorm_kernel,
+                    enable_sequence_parallelism=self.enable_sequence_parallelism,
+                    sequence_parallelism_temporal=self.sequence_parallelism_temporal,
+                    # stdit3
+                    qk_norm=config.qk_norm,
+                    # multiview params
+                    is_control_block=True,
+                    use_st_cross_attn=config.use_st_cross_attn,
+                    skip_cross_attn=config.brushnet_skip_cross_attn,
+                    skip_cross_view=config.control_skip_cross_view,
+                )
+                for i in range(self.depth)
+            ]
+        )
+        self.brushnet_blocks_t = nn.ModuleList(
+            [
+                MultiViewSTDiT3Block(
+                    hidden_size=self.hidden_size,
+                    num_heads=self.num_heads,
+                    mlp_ratio=self.mlp_ratio,
+                    drop_path=drop_path[i],
+                    enable_flash_attn=self.enable_flash_attn,
+                    enable_xformers=self.enable_xformers,
+                    enable_layernorm_kernel=self.enable_layernorm_kernel,
+                    enable_sequence_parallelism=self.enable_sequence_parallelism,
+                    sequence_parallelism_temporal=self.sequence_parallelism_temporal,
+                    # stdit3
+                    qk_norm=config.qk_norm,
+                    temporal=True,
+                    rope=self.rope.rotate_queries_or_keys,
+                    # multiview params
+                    is_control_block=True,
+                    skip_cross_attn=config.brushnet_skip_cross_attn,
+                )
+                for i in range(self.depth)
+            ]
+        )
+        self.x_brushnet_embedder = PatchEmbed3D(
+            self.patch_size, self.in_channels * 2 + 1, self.hidden_size
+        )
+        if config.only_train_brushnet_blocks:
+            for param in self.parameters():
+                param.requires_grad = False
+            for param in self.brushnet_blocks_s.parameters():
+                param.requires_grad = True
+            if self.brushnet_blocks_t is not None:
+                for param in self.brushnet_blocks_t.parameters():
+                    param.requires_grad = True
+            for param in self.x_brushnet_embedder.parameters():
+                param.requires_grad = True
+            logging.info(f"Only train brushnet blocks!")
+
+    def forward(
+        self,
+        x,
+        x_inpaint,
+        mask_inpaint,
+        timestep,
+        y,
+        maps,
+        bbox,
+        cams,
+        rel_pos,
+        fps,
+        height,
+        width,
+        drop_cond_mask=None,
+        drop_frame_mask=None,
+        mv_order_map=None,
+        t_order_map=None,
+        mask=None,
+        x_mask=None,
+        **kwargs,
+    ):
+        """
+        Forward pass of MagicDrive.
+        """
+        dtype = self.x_embedder.proj.weight.dtype
+        B, real_T = x.size(0), rel_pos.size(1)
+        if drop_cond_mask is None:  # camera
+            drop_cond_mask = torch.ones((B), device=x.device, dtype=x.dtype)
+        if drop_frame_mask is None:  # box & rel_pos
+            drop_frame_mask = torch.ones((B, real_T), device=x.device, dtype=x.dtype)
+        if False:
+            # if mv_order_map is None:
+            NC = 1
+        else:
+            NC = len(mv_order_map)
+        x = x.to(dtype)
+        # HACK: to use scheduler, we never assume NC with C
+        assert (
+            x.shape[-2:] == x_inpaint.shape[-2:]
+            and x.shape[-2:] == mask_inpaint.shape[-2:]
+        ), f"x:{x.shape}, x_inpaint:{x_inpaint.shape}, mask_inpaint:{mask_inpaint.shape}"
+        x = rearrange(x, "B (C NC) T ... -> (B NC) C T ...", NC=NC)
+        x_inpaint = x_inpaint.to(dtype)
+        x_inpaint = rearrange(x_inpaint, "B (C NC) T ... -> (B NC) C T ...", NC=NC)
+        mask_inpaint = mask_inpaint.to(dtype)
+        mask_inpaint = rearrange(
+            mask_inpaint, "B (C NC) T ... -> (B NC) C T ...", NC=NC
+        )
+        timestep = timestep.to(dtype)
+        y = y.to(dtype)
+
+        # === get pos embed ===
+        _, _, Tx, Hx, Wx = x.size()
+        x_in_shape = x.shape  # before pad
+        T, H, W = self.get_dynamic_size(x)
+        S = H * W
+
+        # adjust for sequence parallelism
+        # we need to ensure H * W is divisible by sequence parallel size
+        # for simplicity, we can adjust the height to make it divisible
+        h_pad_size = 0
+        if self.training:
+            _simu_sp_size = self.simu_sp_size
+        else:
+            if len(self.simu_sp_size) > 0:
+                warn_once(f"We will ignore `simu_sp_size` if not training.")
+            _simu_sp_size = []
+        if self.force_pad_h_for_sp_size is not None:
+            if S % self.force_pad_h_for_sp_size != 0:
+                h_pad_size = (
+                    self.force_pad_h_for_sp_size - H % self.force_pad_h_for_sp_size
+                )
+                warn_once(
+                    f"Your input shape {x.shape} was rounded into {(T, H, W)}. "
+                    f"With force_pad_h_for_sp_size={self.force_pad_h_for_sp_size}, "
+                    f"it is padded by H with {h_pad_size}. "
+                )
+        elif len(_simu_sp_size) > 0:
+            if (
+                self.enable_sequence_parallelism
+                and not self.sequence_parallelism_temporal
+            ):
+                # make sure the simulated is greater than real sp_size
+                sp_size = dist.get_world_size(get_sequence_parallel_group())
+                possible_sp_size = []
+                for _sp_size in _simu_sp_size:
+                    if _sp_size >= sp_size:
+                        possible_sp_size.append(_sp_size)
+            else:
+                possible_sp_size = _simu_sp_size
+            # random pick one
+            simu_sp_size = random.choice(possible_sp_size)
+            if S % simu_sp_size != 0:
+                h_pad_size = simu_sp_size - H % simu_sp_size
+            if h_pad_size > 0:
+                warn_once(
+                    f"Your input shape {x.shape} was rounded into {(T, H, W)}. "
+                    f"For simu_sp_size={simu_sp_size} out of {possible_sp_size}, "
+                    f"it is padded by H with {h_pad_size}. "
+                    "Please pay attention to potential mismatch between w/ and w/o sp."
+                )
+        elif (
+            self.enable_sequence_parallelism and not self.sequence_parallelism_temporal
+        ):
+            sp_size = dist.get_world_size(get_sequence_parallel_group())
+            if S % sp_size != 0:
+                h_pad_size = sp_size - H % sp_size
+            if h_pad_size > 0:
+                warn_once(
+                    f"Your input shape {x.shape} was rounded into {(T, H, W)}. "
+                    f"For sp_size={sp_size}, it is padded by H with {h_pad_size}. "
+                    "Please pay attention to potential mismatch between w/ and w/o sp."
+                )
+
+        if h_pad_size > 0:
+            # pad x along the H dimension
+            hx_pad_size = h_pad_size * self.patch_size[1]
+            x = F.pad(x, (0, 0, 0, hx_pad_size))
+            x_inpaint = F.pad(x_inpaint, (0, 0, 0, hx_pad_size))
+            mask_inpaint = F.pad(mask_inpaint, (0, 0, 0, hx_pad_size))
+            # adjust parameters
+            H += h_pad_size
+            S = H * W
+            if (
+                self.enable_sequence_parallelism
+                and not self.sequence_parallelism_temporal
+            ):
+                sp_size = dist.get_world_size(get_sequence_parallel_group())
+                assert S % sp_size == 0, f"S={S} should be divisible by {sp_size}!"
+
+        base_size = round(S**0.5)
+        resolution_sq = (height[0].item() * width[0].item()) ** 0.5
+        scale = resolution_sq / self.input_sq_size
+        pos_emb = self.pos_embed(x, H, W, scale=scale, base_size=base_size)
+
+        # === get timestep embed ===
+        t = self.t_embedder(timestep, dtype=x.dtype)  # [B, C]
+        fps = self.fps_embedder(fps.unsqueeze(1), B)
+        t = t + fps
+        t_mlp = self.t_block(t)
+        t0 = t0_mlp = None
+        if x_mask is not None:
+            t0_timestep = torch.zeros_like(timestep)
+            t0 = self.t_embedder(t0_timestep, dtype=x.dtype)
+            t0 = t0 + fps
+            t0_mlp = self.t_block(t0)
+
+        # === get y embed ===
+        # we need to remove the T dim in y
+        # rel_pos & bbox: T -> 1
+        # cam: just take first frame
+        y, y_lens = self.encode_cond_sequence(
+            bbox, cams, rel_pos, y, mask, drop_cond_mask, drop_frame_mask
+        )  # (B, L, D)
+        if y.shape[1] != T and y.shape[1] > 1:
+            warn_once(f"Got y length {y.shape[1]}, will interpolate to {T}.")
+            seq_len = y.shape[2]
+            y = rearrange(y, "B T L D -> B (L D) T")
+            y = F.interpolate(y, T)
+            y = rearrange(y, "B (L D) T -> B T L D", L=seq_len)
+        c = self.encode_map(maps, NC, h_pad_size, x_in_shape)
+        c = rearrange(c, "B (T S) C -> B T S C", T=T)
+
+        # === get x embed ===
+        x_b = self.x_embedder(x)  # [B, N, C]
+        x_b = rearrange(x_b, "B (T S) C -> B T S C", T=T, S=S)
+        x_b = x_b + pos_emb
+
+        if self.x_control_embedder is None:
+            x_c = x_b
+        else:
+            x_c = self.x_control_embedder(x)  # controlnet has another embedder!
+            x_c = rearrange(x_c, "B (T S) C -> B T S C", T=T, S=S)
+            x_c = x_c + pos_emb
+
+        x_concat = torch.cat([x, x_inpaint, mask_inpaint], dim=1)
+        x_inpaint = self.x_brushnet_embedder(x_concat)
+        x_inpaint = rearrange(x_inpaint, "B (T S) C -> B T S C", T=T, S=S)
+        x_inpaint = x_inpaint + pos_emb
+
+        c = x_c + self.before_proj(c)  # first block connection
+        x = x_b
+
+        # shard over the sequence dim if sp is enabled
+        if self.enable_sequence_parallelism:
+            assert not self.sequence_parallelism_temporal, "not support!"
+            x = split_forward_gather_backward(
+                x, get_sequence_parallel_group(), dim=2, grad_scale="down"
+            )
+            c = split_forward_gather_backward(
+                c, get_sequence_parallel_group(), dim=2, grad_scale="down"
+            )
+            x_inpaint = split_forward_gather_backward(
+                x_inpaint, get_sequence_parallel_group(), dim=2, grad_scale="down"
+            )
+            S = S // dist.get_world_size(get_sequence_parallel_group())
+
+        # c = torch.randn_like(x)  # change me!
+        x = rearrange(x, "B T S C -> B (T S) C", T=T, S=S)
+        c = rearrange(c, "B T S C -> B (T S) C", T=T, S=S)
+        x_inpaint = rearrange(x_inpaint, "B T S C -> B (T S) C", T=T, S=S)
+
+        # === blocks ===
+        if x_mask is not None:
+            x_mask = repeat(x_mask, "b ... -> (b NC) ...", NC=NC)
+        for block_i in range(0, self.control_depth):
+            x = auto_grad_checkpoint(
+                self.base_blocks_s[block_i],
+                x,
+                y,
+                t_mlp,
+                y_lens,
+                x_mask,
+                t0_mlp,
+                T,
+                S,
+                NC,
+                mv_order_map,
+                t_order_map,
+            )
+            c, c_skip = auto_grad_checkpoint(
+                self.control_blocks_s[block_i],
+                c,
+                y,
+                t_mlp,
+                y_lens,
+                x_mask,
+                t0_mlp,
+                T,
+                S,
+                NC,
+                mv_order_map,
+                t_order_map,
+            )
+            x_inpaint, x_inpaint_skip = auto_grad_checkpoint(
+                self.brushnet_blocks_s[block_i],
+                x_inpaint,
+                y,
+                t_mlp,
+                y_lens,
+                x_mask,
+                t0_mlp,
+                T,
+                S,
+                NC,
+                mv_order_map,
+                t_order_map,
+            )
+            x = x + c_skip + x_inpaint_skip  # connection
+            if self.base_blocks_t is not None:
+                x = auto_grad_checkpoint(
+                    self.base_blocks_t[block_i],
+                    x,
+                    y,
+                    t_mlp,
+                    y_lens,
+                    x_mask,
+                    t0_mlp,
+                    T,
+                    S,
+                    NC,
+                    mv_order_map,
+                    t_order_map,
+                )
+            if self.control_blocks_t is not None:
+                c, c_skip = auto_grad_checkpoint(
+                    self.control_blocks_t[block_i],
+                    c,
+                    y,
+                    t_mlp,
+                    y_lens,
+                    x_mask,
+                    t0_mlp,
+                    T,
+                    S,
+                    NC,
+                    mv_order_map,
+                    t_order_map,
+                )
+            if self.brushnet_blocks_t is not None:
+                x_inpaint, x_inpaint_skip = auto_grad_checkpoint(
+                    self.brushnet_blocks_t[block_i],
+                    x_inpaint,
+                    y,
+                    t_mlp,
+                    y_lens,
+                    x_mask,
+                    t0_mlp,
+                    T,
+                    S,
+                    NC,
+                    mv_order_map,
+                    t_order_map,
+                )
+                x = x + c_skip + x_inpaint_skip  # connection
+        for block_i in range(self.control_depth, self.depth):
+            x = auto_grad_checkpoint(
+                self.base_blocks_s[block_i],
+                x,
+                y,
+                t_mlp,
+                y_lens,
+                x_mask,
+                t0_mlp,
+                T,
+                S,
+                NC,
+                mv_order_map,
+                t_order_map,
+            )
+            x_inpaint, x_inpaint_skip = auto_grad_checkpoint(
+                self.brushnet_blocks_s[block_i],
+                x_inpaint,
+                y,
+                t_mlp,
+                y_lens,
+                x_mask,
+                t0_mlp,
+                T,
+                S,
+                NC,
+                mv_order_map,
+                t_order_map,
+            )
+            x = x + x_inpaint_skip  # connection
+            if self.base_blocks_t is not None:
+                x = auto_grad_checkpoint(
+                    self.base_blocks_t[block_i],
+                    x,
+                    y,
+                    t_mlp,
+                    y_lens,
+                    x_mask,
+                    t0_mlp,
+                    T,
+                    S,
+                    NC,
+                    mv_order_map,
+                    t_order_map,
+                )
+                if self.brushnet_blocks_t is not None:
+                    x_inpaint, x_inpaint_skip = auto_grad_checkpoint(
+                        self.brushnet_blocks_t[block_i],
+                        x_inpaint,
+                        y,
+                        t_mlp,
+                        y_lens,
+                        x_mask,
+                        t0_mlp,
+                        T,
+                        S,
+                        NC,
+                        mv_order_map,
+                        t_order_map,
+                    )
+                    x = x + x_inpaint_skip  # connection
+
+        if self.enable_sequence_parallelism:
+            x = rearrange(x, "B (T S) C -> B T S C", T=T, S=S)
+            x = gather_forward_split_backward(
+                x, get_sequence_parallel_group(), dim=2, grad_scale="up"
+            )
+            S = S * dist.get_world_size(get_sequence_parallel_group())
+            x = rearrange(x, "B T S C -> B (T S) C", T=T, S=S)
+
+        # === final layer ===
+        x = self.final_layer(
+            x,
+            repeat(t, "b d -> (b NC) d", NC=NC),
+            x_mask,
+            repeat(t0, "b d -> (b NC) d", NC=NC) if t0 is not None else None,
+            T,
+            S,
+        )
+        x = self.unpatchify(x, T, H, W, Tx, Hx, Wx)
+
+        # cast to float32 for better accuracy
+        x = x.to(torch.float32)
+        # HACK: to use scheduler, we never assume NC with C
+        x = rearrange(x, "(B NC) C T ... -> B (C NC) T ...", NC=NC)
+        return x
+
+
 def load_from_stdit3_pretrained(model, from_pretrained):
     from ..stdit import STDiT3
     base_model = STDiT3.from_pretrained(from_pretrained)
@@ -1318,6 +1776,31 @@ def MagicDriveSTDiT3_XL_2(from_pretrained=None, force_huggingface=False, **kwarg
             load_from_stdit3_pretrained(model, from_pretrained)
         elif from_pretrained is not None:
             load_checkpoint(model, from_pretrained, strict=True)
+        elif from_pretrained_pixart is not None:
+            load_from_pixart_pretrained(model, from_pretrained_pixart)
+        else:
+            logging.info(f"Your model does not use any pre-trained model.")
+    return model
+
+
+@MODELS.register_module("MagicDriveSTDiT3-XL/2-BrushNet")
+def MagicDriveSTDiT3_XL_2_BrushNet(
+    from_pretrained=None, force_huggingface=False, **kwargs
+):
+    if from_pretrained is not None and not (os.path.exists(from_pretrained)):
+        model = MagicDriveSTDiT3BrushNet.from_pretrained(from_pretrained, **kwargs)
+    else:
+        from_pretrained_pixart = kwargs.pop("from_pretrained_pixart", None)
+        config = MagicDriveSTDiT3Config(
+            depth=28, hidden_size=1152, patch_size=(1, 2, 2), num_heads=16, **kwargs
+        )
+        model = MagicDriveSTDiT3BrushNet(config)
+        if (
+            from_pretrained is not None and force_huggingface
+        ):  # load from hf stdit3 model
+            load_from_stdit3_pretrained(model, from_pretrained)
+        elif from_pretrained is not None:
+            load_checkpoint(model, from_pretrained, strict=False)
         elif from_pretrained_pixart is not None:
             load_from_pixart_pretrained(model, from_pretrained_pixart)
         else:

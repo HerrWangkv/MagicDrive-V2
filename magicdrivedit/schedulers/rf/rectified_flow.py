@@ -172,3 +172,73 @@ class RFlowScheduler:
         timepoints = timepoints.repeat(1, noise.shape[1], noise.shape[2], noise.shape[3], noise.shape[4])
 
         return timepoints * original_samples + (1 - timepoints) * noise
+
+
+class RFlowSchedulerBrushNet(RFlowScheduler):
+
+    def training_losses(
+        self,
+        model,
+        x_start,
+        x_inpaint,
+        mask_inpaint,
+        model_kwargs=None,
+        noise=None,
+        mask=None,
+        weights=None,
+        t=None,
+    ):
+        """
+        Compute training losses for a single timestep.
+        Arguments format copied from magicdrivedit/schedulers/iddpm/gaussian_diffusion.py/training_losses
+        Note: t is int tensor and should be rescaled from [0, num_timesteps-1] to [1,0]
+        """
+        if t is None:
+            if self.use_discrete_timesteps:
+                t = torch.randint(
+                    0, self.num_timesteps, (x_start.shape[0],), device=x_start.device
+                )
+            elif self.sample_method == "uniform":
+                t = (
+                    torch.rand((x_start.shape[0],), device=x_start.device)
+                    * self.num_timesteps
+                )
+            elif self.sample_method == "logit-normal":
+                t = self.sample_t(x_start) * self.num_timesteps
+
+            if self.use_timestep_transform:
+                t = timestep_transform(
+                    t,
+                    model_kwargs,
+                    scale=self.transform_scale,
+                    num_timesteps=self.num_timesteps,
+                    cog_style=self.cog_style_trans,
+                )
+
+        if model_kwargs is None:
+            model_kwargs = {}
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        assert noise.shape == x_start.shape
+
+        x_t = self.add_noise(x_start, noise, t)
+        if mask is not None:
+            t0 = torch.zeros_like(t)
+            x_t0 = self.add_noise(x_start, noise, t0)
+            x_t = torch.where(mask[:, None, :, None, None], x_t, x_t0)
+
+        terms = {}
+        model_output = model(x_t, x_inpaint, mask_inpaint, t, **model_kwargs)
+        if model_output.shape[1] == 2 * x_t.shape[1]:
+            model_output = model_output.chunk(2, dim=1)[0]
+        velocity_pred = model_output
+        if weights is None:
+            loss = mean_flat((velocity_pred - (x_start - noise)).pow(2), mask=mask)
+        else:
+            weight = _extract_into_tensor(weights, t, x_start.shape)
+            loss = mean_flat(
+                weight * (velocity_pred - (x_start - noise)).pow(2), mask=mask
+            )
+        terms["loss"] = loss
+
+        return terms

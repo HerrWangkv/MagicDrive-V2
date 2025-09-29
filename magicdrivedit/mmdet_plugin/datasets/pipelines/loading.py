@@ -85,6 +85,66 @@ class LoadMultiViewImageFromFiles:
 
 
 @PIPELINES.register_module()
+class LoadMultiViewHumanMaskFromFiles:
+    """Load multi channel masks from a list of separate channel files.
+
+    Expects results['image_paths'] to be a list of filenames.
+
+    Args:
+        to_bool (bool): Whether to convert the img to boolean.
+            Defaults to False.
+        color_type (str): Color type of the file. Defaults to 'unchanged'.
+    """
+
+    def __init__(self, to_bool=True):
+        self.to_bool = to_bool
+
+    def __call__(self, results):
+        """Call function to load multi-view image from files.
+
+        Args:
+            results (dict): Result dict containing multi-view image filenames.
+
+        Returns:
+            dict: The result dict containing the multi-view image data. \
+                Added keys and values are described below.
+
+                - filename (str): Multi-view image filenames.
+                - img (np.ndarray): Multi-view image arrays.
+                - img_shape (tuple[int]): Shape of multi-view image arrays.
+                - ori_shape (tuple[int]): Shape of original image arrays.
+                - pad_shape (tuple[int]): Shape of padded image arrays.
+                - scale_factor (float): Scale factor.
+                - img_norm_cfg (dict): Normalization configuration of images.
+        """
+        filename = results["image_paths"]
+        # img is of shape (h, w, c, num_views)
+        # modified for waymo
+        images = []
+        h, w = 0, 0
+        for name in filename:
+            images.append(
+                Image.open(
+                    name.replace("nuscenes", "nuscenes_masks/human").replace(
+                        ".jpg", ".png"
+                    )
+                )
+            )
+
+        # TODO: consider image padding in waymo
+        results["human_mask"] = images
+        # [1600, 900]
+
+        return results
+
+    def __repr__(self):
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f"(to_bool={self.to_bool})"
+        return repr_str
+
+
+@PIPELINES.register_module()
 class LoadPointsFromMultiSweeps:
     """Load points from multiple sweeps.
 

@@ -123,6 +123,117 @@ class ImageAug3D:
 
 
 @PIPELINES.register_module()
+class ImageHumanMaskAug3D:
+    """3D-aware Image Augmentation: will calculate the rotation and translation
+    parameters accordingly. DO NOT need original extrinsics.
+    """
+
+    def __init__(
+        self, final_dim, resize_lim, bot_pct_lim, rot_lim, rand_flip, is_train
+    ):
+        self.final_dim = final_dim
+        self.resize_lim = resize_lim
+        self.bot_pct_lim = bot_pct_lim
+        self.rand_flip = rand_flip
+        self.rot_lim = rot_lim
+        self.is_train = is_train
+
+    def sample_augmentation(self, results):
+        W, H = results["ori_shape"]
+        fH, fW = self.final_dim
+        if self.is_train:
+            resize = np.random.uniform(*self.resize_lim)
+            resize_dims = (int(W * resize), int(H * resize))
+            newW, newH = resize_dims  # direct after reize
+            crop_h = int((1 - np.random.uniform(*self.bot_pct_lim)) * newH) - fH
+            crop_w = int(np.random.uniform(0, max(0, newW - fW)))
+            crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            flip = False
+            if self.rand_flip and np.random.choice([0, 1]):
+                flip = True
+            rotate = np.random.uniform(*self.rot_lim)
+        else:
+            resize = np.mean(self.resize_lim)
+            resize_dims = (int(W * resize), int(H * resize))
+            newW, newH = resize_dims
+            crop_h = int((1 - np.mean(self.bot_pct_lim)) * newH) - fH
+            crop_w = int(max(0, newW - fW) / 2)
+            crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+            flip = False
+            rotate = 0
+        return resize, resize_dims, crop, flip, rotate
+
+    def img_mask_transform(
+        self, img, mask, rotation, translation, resize, resize_dims, crop, flip, rotate
+    ):
+        # adjust image
+        img = img.resize(resize_dims)
+        mask = mask.resize(resize_dims)
+        img = img.crop(crop)
+        mask = mask.crop(crop)
+        if flip:
+            img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
+            mask = mask.transpose(method=Image.FLIP_LEFT_RIGHT)
+        img = img.rotate(rotate)
+        mask = mask.rotate(rotate)
+
+        # post-homography transformation
+        rotation *= resize
+        translation -= torch.Tensor(crop[:2])
+        if flip:
+            A = torch.Tensor([[-1, 0], [0, 1]])
+            b = torch.Tensor([crop[2] - crop[0], 0])
+            rotation = A.matmul(rotation)
+            translation = A.matmul(translation) + b
+        theta = rotate / 180 * np.pi
+        A = torch.Tensor(
+            [
+                [np.cos(theta), np.sin(theta)],
+                [-np.sin(theta), np.cos(theta)],
+            ]
+        )
+        b = torch.Tensor([crop[2] - crop[0], crop[3] - crop[1]]) / 2
+        b = A.matmul(-b) + b
+        rotation = A.matmul(rotation)
+        translation = A.matmul(translation) + b
+
+        return img, mask, rotation, translation
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        imgs = data["img"]
+        masks = data["human_mask"]
+        new_imgs = []
+        new_masks = []
+        transforms = []
+        for img, mask in zip(imgs, masks):
+            resize, resize_dims, crop, flip, rotate = self.sample_augmentation(data)
+            post_rot = torch.eye(2)
+            post_tran = torch.zeros(2)
+            new_img, new_mask, rotation, translation = self.img_mask_transform(
+                img,
+                mask,
+                post_rot,
+                post_tran,
+                resize=resize,
+                resize_dims=resize_dims,
+                crop=crop,
+                flip=flip,
+                rotate=rotate,
+            )
+            transform = torch.eye(4)
+            transform[:2, :2] = rotation
+            transform[:2, 3] = translation
+            new_imgs.append(new_img)
+            new_masks.append(new_mask)
+            transforms.append(transform.numpy())
+        data["img"] = new_imgs
+        data["human_mask"] = new_masks
+        # update the calibration matrices
+        data["img_aug_matrix"] = transforms
+        return data
+
+
+@PIPELINES.register_module()
 class GlobalRotScaleTrans:
     """Only for points, lidar and boxes"""
 
@@ -647,6 +758,102 @@ class ReorderMultiViewImages:
 
 
 @PIPELINES.register_module()
+class ReorderMultiViewImagesHumanMasks:
+    """Reorder camera views.
+    ori_order is from `tools/data_converter/nuscenes_converter.py`
+    Args:
+        order (list[str]): List of camera names.
+        safe (bool, optional): if True, will check every key. Defaults to True.
+    """
+
+    ORI_ORDER = [
+        "CAM_FRONT",
+        "CAM_FRONT_RIGHT",
+        "CAM_FRONT_LEFT",
+        "CAM_BACK",
+        "CAM_BACK_LEFT",
+        "CAM_BACK_RIGHT",
+    ]
+
+    SAFE_KEYS = [
+        "token",
+        "sample_idx",
+        "lidar_path",
+        "sweeps",
+        "timestamp",
+        "location",
+        "description",
+        "timeofday",
+        "visibility",
+        "ego2global",
+        "lidar2ego",
+        "ann_info",
+        "img_fields",
+        "bbox3d_fields",
+        "pts_mask_fields",
+        "pts_seg_fields",
+        "bbox_fields",
+        "mask_fields",
+        "seg_fields",
+        "box_type_3d",
+        "box_mode_3d",
+        "img_shape",
+        "ori_shape",
+        "pad_shape",
+        "scale_factor",
+        "gt_bboxes_3d",
+        "gt_labels_3d",
+        "lidar_aug_matrix",
+        "gt_masks_bev_static",
+        "gt_masks_bev",
+        "gt_aux_bev",
+    ]
+    REORDER_KEYS = [
+        "image_paths",
+        "lidar2camera",
+        "lidar2image",
+        "camera2ego",
+        "camera_intrinsics",
+        "camera2lidar",
+        "filename",
+        "img",
+        "human_mask",
+        "img_aug_matrix",
+    ]
+    WARN_KEYS = []
+
+    def __init__(self, order, safe=True):
+        self.order = order
+        self.order_mapper = [self.ORI_ORDER.index(it) for it in self.order]
+        self.safe = safe
+
+    def reorder(self, value):
+        assert len(value) == len(self.order_mapper)
+        if isinstance(value, list):  # list do not support indexing by list
+            return [value[i] for i in self.order_mapper]
+        else:
+            return value[self.order_mapper]
+
+    def __call__(self, data):
+        if self.safe:
+            for k in [k for k in data.keys()]:
+                if k in self.SAFE_KEYS:
+                    continue
+                if k in self.REORDER_KEYS:
+                    data[k] = self.reorder(data[k])
+                elif k in self.WARN_KEYS:
+                    # it should be empty or none
+                    assert not data[k], f"you need to handle {k}: {data[k]}"
+                else:
+                    raise RuntimeWarning(f"You have unhandled key ({k}) in data")
+        else:
+            for k in self.REORDER_KEYS:
+                if k in data:
+                    data[k] = self.reorder(data[k])
+        return data
+
+
+@PIPELINES.register_module()
 class ObjectNameFilter:
     """Filter GT objects by their names.
     As object names in use are assigned by initialization, this only remove -1,
@@ -1039,6 +1246,20 @@ class ImageNormalize:
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
         data["img"] = [self.compose(img) for img in data["img"]]
         data["img_norm_cfg"] = dict(mean=self.mean, std=self.std)
+        return data
+
+
+@PIPELINES.register_module()
+class HumanMaskToTensor:
+    def __init__(self):
+        self.compose = torchvision.transforms.Compose(
+            [
+                torchvision.transforms.ToTensor(),
+            ]
+        )
+
+    def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        data["human_mask"] = [self.compose(mask) for mask in data["human_mask"]]
         return data
 
 

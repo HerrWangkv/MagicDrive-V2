@@ -18,6 +18,9 @@ docker run -it --rm --gpus all --name MagicDrive2 \
     # Mount the squashfs to temporary location
     squashfuse /data/nuscenes.sqfs /data/nuscenes
     
+    # Create target directory for symbolic links
+    mkdir -p /MagicDrive-V2/data/nuscenes
+    
     # Create symbolic links for everything under /data/nuscenes to data/nuscenes
     for item in /data/nuscenes/*; do
         if [ -e \"\$item\" ]; then
