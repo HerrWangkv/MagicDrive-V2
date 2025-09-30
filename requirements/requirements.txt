@@ -12,7 +12,8 @@
 # flash-attn>=2.6.3
 
 # can use pip install -r requirements.txt
-mmcv==1.7.2
+-f https://download.openmmlab.com/mmcv/dist/cu124/torch2.4.0/index.html
+mmcv-full==1.7.2
 mmdet==2.28.2
 mmengine>=0.10.3
 timm==0.9.16

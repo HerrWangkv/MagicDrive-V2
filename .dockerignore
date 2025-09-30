@@ -3,3 +3,4 @@ ckpts
 data
 outputs
 *.h5
+*.sif
