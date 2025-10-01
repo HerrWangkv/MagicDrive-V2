@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=magicdrive_brushnet
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:30:00
-#SBATCH --partition=dev_accelerated
+#SBATCH --time=48:00:00
+#SBATCH --partition=accelerated-h200
 #SBATCH --output=logs/train_brushnet_%j.out
 #SBATCH --error=logs/train_brushnet_%j.err
 
@@ -13,8 +13,7 @@
 mkdir -p logs
 
 # Set environment variables
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-export MASTER_ADDR=localhost
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_NODELIST | head -n1)
 export MASTER_PORT=29500
 
 # SquashFS configuration
@@ -165,9 +164,6 @@ apptainer exec --nv --writable-tmpfs \
     --env SLURM_NODEID="${SLURM_NODEID}" \
     --env SLURM_JOB_NUM_NODES="${SLURM_JOB_NUM_NODES}" \
     --env MOUNT_PATH_RAW="${MOUNT_PATH_RAW}" \
-    --env CUDA_HOME="/software/all/devel/cuda/12.2" \
-    --env PATH="/software/all/devel/cuda/12.2/bin:$PATH" \
-    --bind /software/all/devel/cuda/12.2:/software/all/devel/cuda/12.2 \
     --bind /home/hk-project-p0023969/xw2723/test/MagicDrive-V2:/MagicDrive-V2 \
     --bind "${MOUNT_PATH_RAW}:/data/nuscenes" \
     --bind /hkfs/work/workspace/scratch/xw2723-nuscenes/nuscenes_masks:/data/nuscenes_masks \
@@ -177,15 +173,17 @@ apptainer exec --nv --writable-tmpfs \
     --workdir /MagicDrive-V2 \
     magicdrive2.sif \
     bash -c "
+        # Override CUDA_HOME to use container's CUDA installation
+        export CUDA_HOME=/usr/local/cuda
+        export CXX=/usr/bin/g++
+        export CC=/usr/bin/gcc
+        export TMPDIR=$HOME/tmp
+        mkdir -p $TMPDIR
+        
         # CRITICAL: Force change to container path
         cd /MagicDrive-V2
         echo 'Forced working directory change to:'
         pwd
-        
-        # Set CUDA environment inside container to use host CUDA 12.2
-        export CUDA_HOME=/software/all/devel/cuda/12.2
-        export PATH=/software/all/devel/cuda/12.2/bin:\$PATH
-        export LD_LIBRARY_PATH=/software/all/devel/cuda/12.2/lib64:\$LD_LIBRARY_PATH
         
         # Debug: Check working directory and Python paths
         echo 'Current working directory:'
@@ -195,12 +193,14 @@ apptainer exec --nv --writable-tmpfs \
         echo 'Contents of current directory:'
         ls -la . | head -5
         
-        # Verify CUDA setup
-        echo 'CUDA_HOME: '\$CUDA_HOME
-        echo 'nvcc location: '\$(which nvcc 2>/dev/null || echo 'nvcc not found')
+        # Verify CUDA setup (container's built-in CUDA)
+        echo \"CUDA_HOME: \$CUDA_HOME\"
+        echo \"nvcc location: \$(which nvcc 2>/dev/null || echo 'nvcc not found')\"
         if which nvcc >/dev/null 2>&1; then
-            echo 'nvcc version: '\$(nvcc --version | grep release)
+            echo \"nvcc version: \$(nvcc --version | grep release)\"
         fi
+        echo \"PyTorch CUDA version: \$(python3 -c 'import torch; print(torch.version.cuda)' 2>/dev/null || echo 'Could not detect PyTorch CUDA version')\"
+        echo \"CUDA available in PyTorch: \$(python3 -c 'import torch; print(torch.cuda.is_available())' 2>/dev/null || echo 'Could not check CUDA availability')\"
         
         # Create nuscenes data directory structure
         mkdir -p /MagicDrive-V2/data/nuscenes
@@ -248,8 +248,10 @@ apptainer exec --nv --writable-tmpfs \
         # Run the training command with relative paths from /MagicDrive-V2
         echo 'About to run training from:' \$(pwd)
         echo 'Training script location:' \$(ls -la scripts/train_brushnet.py)
+
+        python3 -m pip install --no-cache-dir numpy==1.24.2
         
-        torchrun --nproc-per-node=4 --nnodes=1 --node_rank=0 \
+        torchrun --nproc-per-node=4 --nnodes=$SLURM_JOB_NUM_NODES --node_rank=$SLURM_NODEID \
             --master_addr=\$MASTER_ADDR --master_port=\$MASTER_PORT \
             scripts/train_brushnet.py configs/magicdrive/train/brushnet.py \
             --cfg-options num_workers=2 prefetch_factor=2

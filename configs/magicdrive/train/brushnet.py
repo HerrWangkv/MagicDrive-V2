@@ -5,20 +5,52 @@ bbox_mode = 'all-xyz'
 
 data_cfg_names = [
     ((224, 400), "Nuscenes_map_cache_box_t_with_n2t_12Hz_brushnet"),
-    # ((424, 800), "Nuscenes_400_map_cache_box_t_with_n2t_12Hz_brushnet"),
+    ((424, 800), "Nuscenes_400_map_cache_box_t_with_n2t_12Hz_brushnet"),
     # ((848, 1600), "Nuscenes_400_map_cache_box_t_with_n2t_12Hz_848x1600"),
 ]
 video_lengths_fps = {  # all lengths are 8n or 8n+1
     "224x400": [
-        [1, 17, "full",],  # min=187, max=241
-        [[120,], [12,], [12,],],
+        [
+            1,
+            17,
+            "full",
+        ],  # min=187, max=241
+        [
+            [
+                120,
+            ],
+            [
+                12,
+            ],
+            [
+                12,
+            ],
+        ],
         [1, 1, 40],  # repeat time
     ],
-    # "424x800": [
-    #     [1, 17, 33, 65, 129,], 
-    #     [[120,], [12,], [12,], [12], [12],],
-    #     [1, 1, 1, 1, 1],
-    # ],
+    "424x800": [
+        [
+            1,
+            17,
+            33,
+            65,
+            129,
+        ],
+        [
+            [
+                120,
+            ],
+            [
+                12,
+            ],
+            [
+                12,
+            ],
+            [12],
+            [12],
+        ],
+        [1, 1, 1, 1, 1],
+    ],
     # "848x1600": [
     #     [1, 9, 17, 33,],
     #     [[120,], [12,], [12], [12],],
@@ -49,19 +81,25 @@ dataset_cfg_overrides = [
         ("dataset.data.val.fps", video_lengths_fps["224x400"][1]),
         ("+dataset.data.val.micro_frame_size", micro_frame_size),
     ),
-    # (
-    #     # key, value
-    #     ("dataset.data.train.ann_file", "./data/nuscenes_mmdet3d-12Hz/nuscenes_interp_12Hz_infos_train_with_bid.pkl"),
-    #     ("dataset.data.val.ann_file", "./data/nuscenes_mmdet3d-12Hz/nuscenes_interp_12Hz_infos_val_with_bid.pkl"),
-    #     ("dataset.data.train.type", "NuScenesVariableDataset"),
-    #     ("dataset.data.val.type", "NuScenesVariableDataset"),
-    #     ("dataset.data.train.video_length", video_lengths_fps["424x800"][0]),
-    #     ("dataset.data.train.fps", video_lengths_fps["424x800"][1]),
-    #     ("+dataset.data.train.repeat_times", video_lengths_fps["424x800"][2]),
-    #     ("+dataset.data.train.balance_keywords", balance_keywords),
-    #     ("dataset.data.val.video_length", video_lengths_fps["424x800"][0]),
-    #     ("dataset.data.val.fps", video_lengths_fps["424x800"][1]),
-    # ),
+    (
+        # key, value
+        (
+            "dataset.data.train.ann_file",
+            "./data/nuscenes_mmdet3d-12Hz/nuscenes_interp_12Hz_infos_train_with_bid.pkl",
+        ),
+        (
+            "dataset.data.val.ann_file",
+            "./data/nuscenes_mmdet3d-12Hz/nuscenes_interp_12Hz_infos_val_with_bid.pkl",
+        ),
+        ("dataset.data.train.type", "NuScenesVariableDataset"),
+        ("dataset.data.val.type", "NuScenesVariableDataset"),
+        ("dataset.data.train.video_length", video_lengths_fps["424x800"][0]),
+        ("dataset.data.train.fps", video_lengths_fps["424x800"][1]),
+        ("+dataset.data.train.repeat_times", video_lengths_fps["424x800"][2]),
+        ("+dataset.data.train.balance_keywords", balance_keywords),
+        ("dataset.data.val.video_length", video_lengths_fps["424x800"][0]),
+        ("dataset.data.val.fps", video_lengths_fps["424x800"][1]),
+    ),
     # (
     #     # key, value
     #     ("dataset.data.train.ann_file", "./data/nuscenes_mmdet3d-12Hz/nuscenes_interp_12Hz_infos_train_with_bid.pkl"),
@@ -109,18 +147,18 @@ bucket_config = {
 # no need to change this!
 
 validation_index = [
-    # "1828-424-800-12-33",
-    # "5543-424-800-12-33",
-    # "6720-424-800-12-33",
-    # "14449-424-800-12-33",
-    # "5538-424-800-12-65",
-    # "14631-424-800-12-65",
-    # "6720-424-800-12-65",
-    # "14449-424-800-12-65",
-    # "3649-424-800-12-65",  # know
-    #  "912-424-800-12-129",
-    # "1680-424-800-12-129",
-    # "3657-424-800-12-129",
+    "1828-424-800-12-33",
+    "5543-424-800-12-33",
+    "6720-424-800-12-33",
+    "14449-424-800-12-33",
+    "5538-424-800-12-65",
+    "14631-424-800-12-65",
+    "6720-424-800-12-65",
+    "14449-424-800-12-65",
+    "3649-424-800-12-65",  # know
+    "912-424-800-12-129",
+    "1680-424-800-12-129",
+    "3657-424-800-12-129",
     "24-224-400-12-full",
     "145-224-400-12-full",
     "105-224-400-12-full",
@@ -302,7 +340,7 @@ report_every = ckpt_every
 # optimization settings
 load = None
 grad_clip = 1.0
-lr = 8e-5
+lr = 1e-5
 ema_decay = 0.99
 adam_eps = 1e-15
 weight_decay = 1e-2
