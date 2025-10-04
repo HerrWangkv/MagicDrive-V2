@@ -1579,6 +1579,7 @@ class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
                     mv_order_map,
                     t_order_map,
                 )
+                x = x + c_skip  # connection
             if self.brushnet_blocks_t is not None:
                 x_inpaint, x_inpaint_skip = auto_grad_checkpoint(
                     self.brushnet_blocks_t[block_i],
@@ -1594,7 +1595,7 @@ class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
                     mv_order_map,
                     t_order_map,
                 )
-                x = x + c_skip + x_inpaint_skip  # connection
+                x = x + x_inpaint_skip  # connection
         for block_i in range(self.control_depth, self.depth):
             x = auto_grad_checkpoint(
                 self.base_blocks_s[block_i],
