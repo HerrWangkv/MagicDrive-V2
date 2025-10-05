@@ -498,6 +498,10 @@ def main():
                 pedestrian_frames = rearrange(
                     pedestrian_frames, "T C H (NC W) -> NC C T H W", W=w
                 )  # NC, C, T, H, W
+                # Swap pedestrian_frames[3] and pedestrian_frames[5]
+                tmp = pedestrian_frames[3].clone()
+                pedestrian_frames[3] = pedestrian_frames[5]
+                pedestrian_frames[5] = tmp
                 pedestrian_frames = pedestrian_frames * 2 - 1  # [0, 1] -> [-1, 1]
 
                 pedestrian_mask_video_path = os.path.join(
@@ -519,6 +523,9 @@ def main():
                 pedestrian_mask_frames = rearrange(
                     pedestrian_mask_frames, "T 1 H (NC W) -> NC 1 T H W", W=w
                 )  # NC, 1, T, H, W
+                tmp = pedestrian_mask_frames[3].clone()
+                pedestrian_mask_frames[3] = pedestrian_mask_frames[5]
+                pedestrian_mask_frames[5] = tmp
                 if cfg.sp_size > 1:
                     z_pedestrian = sp_vae(
                         pedestrian_frames.to(dtype),
