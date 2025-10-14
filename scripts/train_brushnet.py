@@ -544,11 +544,11 @@ def main():
                                     # NOTE: due to randomness, they may not match!
                                     x = sp_vae(x, vae.encode,
                                                get_sequence_parallel_group())
-                                    x_human = sp_vae(x_human, vae.encode,
-                                                     get_sequence_parallel_group())
+                                    # x_human and human_mask are NOT encoded by VAE
+                                    # They will be processed by the shallow encoder in the model
                             # assert torch.allclose(x_old, x)
-                        human_mask = F.interpolate(
-                            human_mask, size=x.shape[-3:], mode="nearest")
+                        # human_mask is NOT interpolated here
+                        # It will be interpolated in the model after shallow encoding
                         # Prepare text inputs
                         if cfg.get("load_text_features", False):
                             model_args = {"y": y.to(device, dtype)}

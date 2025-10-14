@@ -1234,10 +1234,71 @@ class MagicDriveSTDiT3(PreTrainedModel):
         return x
 
 
+class ShallowEncoder(nn.Module):
+    """
+    Shallow encoder for encoding human-masked images.
+    Replaces VAE encoding with a lightweight trainable network.
+
+    VAE encodes: (BxNC, 3, 4t+1, 8h, 8w) -> (BxNC, out_channels, t, h, w)
+    - Spatial downsampling: 8x (h/8, w/8)
+    - Temporal downsampling: 4x+1 -> 1x (from 4t+1 frames to t frames)
+    """
+
+    def __init__(self, in_channels=3, out_channels=4, temporal_downsample=4):
+        super().__init__()
+        self.temporal_downsample = temporal_downsample
+
+        # Spatial downsampling (3 conv layers with stride 2 each = 8x downsampling)
+        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1)
+        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1)
+        self.conv4 = nn.Conv2d(256, out_channels, kernel_size=3, stride=1, padding=1)
+        self.relu = nn.ReLU(inplace=True)
+
+        # Temporal downsampling via 3D convolution
+        # Input: (out_channels, 4t+1, h, w) -> Output: (out_channels, t, h, w)
+        self.temporal_conv = nn.Conv3d(
+            out_channels,
+            out_channels,
+            kernel_size=(
+                temporal_downsample + 1,
+                1,
+                1,
+            ),  # (5, 1, 1) for temporal_downsample=4
+            stride=(temporal_downsample, 1, 1),  # (4, 1, 1)
+            padding=(temporal_downsample // 2, 0, 0),  # (2, 0, 0)
+        )
+
+    def forward(self, x):
+        # x: (BxNC, C, T, H, W) where T = 4t+1
+        B_NC, C, T, H, W = x.shape
+
+        # Spatial downsampling: process each frame independently
+        x = rearrange(x, "b c t h w -> (b t) c h w")
+        x = self.relu(self.conv1(x))  # -> (b*t, 64, h/2, w/2)
+        x = self.relu(self.conv2(x))  # -> (b*t, 128, h/4, w/4)
+        x = self.relu(self.conv3(x))  # -> (b*t, 256, h/8, w/8)
+        x = self.conv4(x)  # -> (b*t, out_channels, h/8, w/8)
+        x = rearrange(x, "(b t) c h w -> b c t h w", b=B_NC, t=T)
+
+        # Temporal downsampling: reduce from 4t+1 frames to t frames
+        x = self.temporal_conv(x)  # -> (b, out_channels, t, h/8, w/8)
+
+        return x
+
+
 class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
     def __init__(self, config: MagicDriveSTDiT3Config):
         super().__init__(config)
         drop_path = [x.item() for x in torch.linspace(0, config.drop_path, self.depth)]
+
+        # Add shallow encoder for encoding human-masked images
+        self.shallow_encoder = ShallowEncoder(
+            in_channels=3,
+            out_channels=self.in_channels,  # match VAE output channels
+            temporal_downsample=4,
+        )
+
         self.brushnet_blocks_s = nn.ModuleList(
             [
                 MultiViewSTDiT3Block(
@@ -1297,7 +1358,9 @@ class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
                     param.requires_grad = True
             for param in self.x_brushnet_embedder.parameters():
                 param.requires_grad = True
-            logging.info(f"Only train brushnet blocks!")
+            for param in self.shallow_encoder.parameters():
+                param.requires_grad = True
+            logging.info(f"Only train brushnet blocks and shallow encoder!")
 
     def forward(
         self,
@@ -1337,19 +1400,35 @@ class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
             NC = len(mv_order_map)
         x = x.to(dtype)
         # HACK: to use scheduler, we never assume NC with C
-        assert (
-            x.shape[-2:] == x_inpaint.shape[-2:]
-            and x.shape[-2:] == mask_inpaint.shape[-2:]
-        ), f"x:{x.shape}, x_inpaint:{x_inpaint.shape}, mask_inpaint:{mask_inpaint.shape}"
         x = rearrange(x, "B (C NC) T ... -> (B NC) C T ...", NC=NC)
+
+        # Prepare x_inpaint - it will be encoded by shallow encoder later
         x_inpaint = x_inpaint.to(dtype)
         x_inpaint = rearrange(x_inpaint, "B (C NC) T ... -> (B NC) C T ...", NC=NC)
+
         mask_inpaint = mask_inpaint.to(dtype)
         mask_inpaint = rearrange(
             mask_inpaint, "B (C NC) T ... -> (B NC) C T ...", NC=NC
         )
         timestep = timestep.to(dtype)
         y = y.to(dtype)
+
+        # === Encode x_inpaint with shallow encoder BEFORE padding ===
+        # x_inpaint: (B NC) 3 T H W -> shallow_encoder -> (B NC) C T H/8 W/8
+        # This makes x_inpaint_encoded have the same spatial dimensions as x
+        x_inpaint_encoded = self.shallow_encoder(x_inpaint)
+
+        # Interpolate mask_inpaint to match x's spatial dimensions (latent space)
+        # mask_inpaint is at original resolution, needs to be downsampled to match x
+        mask_inpaint = F.interpolate(
+            mask_inpaint, size=x.shape[-3:], mode="trilinear", align_corners=False
+        )
+
+        # Now check that encoded x_inpaint has same shape as x (both are latent space)
+        assert (
+            x.shape[-3:] == x_inpaint_encoded.shape[-3:]
+            and x.shape[-3:] == mask_inpaint.shape[-3:]
+        ), f"After encoding - x:{x.shape}, x_inpaint_encoded:{x_inpaint_encoded.shape}, mask_inpaint:{mask_inpaint.shape}"
 
         # === get pos embed ===
         _, _, Tx, Hx, Wx = x.size()
@@ -1418,7 +1497,8 @@ class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
             # pad x along the H dimension
             hx_pad_size = h_pad_size * self.patch_size[1]
             x = F.pad(x, (0, 0, 0, hx_pad_size))
-            x_inpaint = F.pad(x_inpaint, (0, 0, 0, hx_pad_size))
+            # Also pad the encoded inpaint tensors (already in latent space)
+            x_inpaint_encoded = F.pad(x_inpaint_encoded, (0, 0, 0, hx_pad_size))
             mask_inpaint = F.pad(mask_inpaint, (0, 0, 0, hx_pad_size))
             # adjust parameters
             H += h_pad_size
@@ -1475,7 +1555,9 @@ class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
             x_c = rearrange(x_c, "B (T S) C -> B T S C", T=T, S=S)
             x_c = x_c + pos_emb
 
-        x_concat = torch.cat([x, x_inpaint, mask_inpaint], dim=1)
+        # x_inpaint_encoded and mask_inpaint were already processed before padding
+        # Now concatenate them with x for brushnet processing
+        x_concat = torch.cat([x, x_inpaint_encoded, mask_inpaint], dim=1)
         x_inpaint = self.x_brushnet_embedder(x_concat)
         x_inpaint = rearrange(x_inpaint, "B (T S) C -> B T S C", T=T, S=S)
         x_inpaint = x_inpaint + pos_emb

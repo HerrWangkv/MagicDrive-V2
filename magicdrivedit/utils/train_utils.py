@@ -72,9 +72,8 @@ def run_brushnet_validation(
         )  # BxNC, C, T, H, W
         x_human = torch.where(human_mask > 0.5, x, torch.ones_like(x))
         del x
-        with torch.no_grad():
-            x_human = vae.encode(x_human)
-        human_mask = F.interpolate(human_mask, size=x_human.shape[-3:], mode="nearest")
+        # x_human and human_mask are NOT encoded/interpolated by VAE
+        # They will be processed by the shallow encoder in the model
         x_human = rearrange(
             x_human, "(B NC) C T ... -> B (C NC) T ...", NC=NC
         )  # B, (C, NC), T, H, W
