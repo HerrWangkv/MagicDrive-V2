@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=magicdrive_brushnet
-#SBATCH --nodes=1
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=48:00:00
-#SBATCH --partition=accelerated-h200
+#SBATCH --partition=accelerated-h100
 #SBATCH --output=logs/train_brushnet_%j.out
 #SBATCH --error=logs/train_brushnet_%j.err
 
@@ -155,15 +155,9 @@ srun bash -c wait_for_mount
 
 echo "SquashFS mount is ready"
 
-# Run the training script with Apptainer
-apptainer exec --nv --writable-tmpfs \
-    --env MASTER_ADDR="${MASTER_ADDR}" \
-    --env MASTER_PORT="${MASTER_PORT}" \
-    --env SLURM_PROCID="${SLURM_PROCID}" \
-    --env SLURM_LOCALID="${SLURM_LOCALID}" \
-    --env SLURM_NODEID="${SLURM_NODEID}" \
-    --env SLURM_JOB_NUM_NODES="${SLURM_JOB_NUM_NODES}" \
-    --env MOUNT_PATH_RAW="${MOUNT_PATH_RAW}" \
+# Run the training script with Apptainer on ALL nodes (one container per node)
+srun --label --export=ALL --ntasks-per-node=1 --gres=gpu:4 \
+    apptainer exec --nv --writable-tmpfs \
     --bind /home/hk-project-p0023969/xw2723/test/MagicDrive-V2:/MagicDrive-V2 \
     --bind "${MOUNT_PATH_RAW}:/data/nuscenes" \
     --bind /hkfs/work/workspace/scratch/xw2723-nuscenes/nuscenes_masks:/data/nuscenes_masks \
@@ -251,11 +245,13 @@ apptainer exec --nv --writable-tmpfs \
 
         python3 -m pip install --no-cache-dir numpy==1.24.2
         
-        torchrun --nproc-per-node=4 --nnodes=$SLURM_JOB_NUM_NODES --node_rank=$SLURM_NODEID \
-            --master_addr=\$MASTER_ADDR --master_port=\$MASTER_PORT \
-            scripts/train_brushnet.py configs/magicdrive/train/brushnet.py \
-            --cfg-options num_workers=2 prefetch_factor=2
-    "
+        NODE_RANK=\${SLURM_NODEID:-\$SLURM_PROCID}; \
+        NODE_RANK=\${NODE_RANK:-0}; \
+        echo 'Launching torchrun with nnodes='\$SLURM_JOB_NUM_NODES' node_rank='\$NODE_RANK' master='\$MASTER_ADDR':'\$MASTER_PORT; \
+        torchrun --nproc-per-node=4 --nnodes=\$SLURM_JOB_NUM_NODES --node_rank=\$NODE_RANK \
+          --master_addr=\$MASTER_ADDR --master_port=\$MASTER_PORT \
+          scripts/train_brushnet.py configs/magicdrive/train/brushnet.py \
+          --cfg-options num_workers=2 prefetch_factor=2"
 
 echo "End time: $(date)"
 echo "Job completed successfully"
