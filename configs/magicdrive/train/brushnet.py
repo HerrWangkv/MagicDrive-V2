@@ -340,6 +340,7 @@ report_every = ckpt_every
 # optimization settings
 load = "./outputs/MagicDriveSTDiT3-XL-2-BrushNet_brushnet_20251015-0830/epoch0-global_step4000"
 grad_clip = 1.0
+reset_lr = True
 lr = 2e-5
 ema_decay = 0.99
 adam_eps = 1e-15
