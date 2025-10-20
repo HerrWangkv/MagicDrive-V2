@@ -1,5 +1,6 @@
 import os
 import logging
+import math
 
 DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "gpu")
 
@@ -391,7 +392,7 @@ class MagicDriveSTDiT3Config(PretrainedConfig):
         zero_and_train_embedder=None,
         only_train_base_blocks=False,
         only_train_temp_blocks=False,
-        only_train_brushnet_blocks=False,
+        only_train_extra_blocks=False,
         qk_norm_trainable=False,
         sequence_parallelism_temporal=False,
         control_depth=13,
@@ -409,6 +410,10 @@ class MagicDriveSTDiT3Config(PretrainedConfig):
         control_skip_cross_view=True,
         control_skip_temporal=True,
         brushnet_skip_cross_attn=True,
+        use_lora_base_blocks=False,
+        lora_rank=16,
+        lora_alpha=32,
+        lora_dropout=0.0,
         **kwargs,
     ):
         self.input_size = input_size
@@ -440,7 +445,7 @@ class MagicDriveSTDiT3Config(PretrainedConfig):
         self.zero_and_train_embedder = zero_and_train_embedder
         self.only_train_base_blocks = only_train_base_blocks
         self.only_train_temp_blocks = only_train_temp_blocks
-        self.only_train_brushnet_blocks = only_train_brushnet_blocks
+        self.only_train_extra_blocks = only_train_extra_blocks
         self.qk_norm_trainable = qk_norm_trainable
         self.enable_xformers = enable_xformers
         self.sequence_parallelism_temporal = sequence_parallelism_temporal
@@ -459,6 +464,10 @@ class MagicDriveSTDiT3Config(PretrainedConfig):
         self.control_skip_cross_view = control_skip_cross_view
         self.control_skip_temporal = control_skip_temporal
         self.brushnet_skip_cross_attn = brushnet_skip_cross_attn
+        self.use_lora_base_blocks = use_lora_base_blocks
+        self.lora_rank = lora_rank
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
         super().__init__(**kwargs)
 
 
@@ -1348,9 +1357,20 @@ class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
         self.x_brushnet_embedder = PatchEmbed3D(
             self.patch_size, self.in_channels * 2 + 1, self.hidden_size
         )
-        if config.only_train_brushnet_blocks:
-            for param in self.parameters():
-                param.requires_grad = False
+        
+        # apply LoRA to base_blocks_s and base_blocks_t if configured
+        if config.use_lora_base_blocks:
+            logging.info(f"Applying LoRA to base_blocks_s and base_blocks_t with rank={config.lora_rank}, alpha={config.lora_alpha}")
+            self._apply_lora_to_blocks(self.base_blocks_s, config.lora_rank, config.lora_alpha, config.lora_dropout)
+            if self.base_blocks_t is not None:
+                self._apply_lora_to_blocks(self.base_blocks_t, config.lora_rank, config.lora_alpha, config.lora_dropout)
+            
+        if config.only_train_extra_blocks:
+            for name, param in self.named_parameters():
+                if "lora_A" in name or "lora_B" in name:
+                    param.requires_grad = True
+                else:
+                    param.requires_grad = False
             for param in self.brushnet_blocks_s.parameters():
                 param.requires_grad = True
             if self.brushnet_blocks_t is not None:
@@ -1360,7 +1380,76 @@ class MagicDriveSTDiT3BrushNet(MagicDriveSTDiT3):
                 param.requires_grad = True
             for param in self.shallow_encoder.parameters():
                 param.requires_grad = True
-            logging.info(f"Only train brushnet blocks and shallow encoder!")
+            logging.info(f"Only train brushnet blocks, shallow encoder and lora parameters!")
+            
+
+    def _apply_lora_to_blocks(self, blocks, rank, alpha, dropout=0.0):
+        """Apply LoRA to linear layers in the given blocks."""
+        for block in blocks:
+            # Apply LoRA to attention projection layers
+            if hasattr(block, 'attn'):
+                self._add_lora_to_linear(block.attn.qkv, rank, alpha, dropout)
+                self._add_lora_to_linear(block.attn.proj, rank, alpha, dropout)
+            
+            # Apply LoRA to cross attention if it exists
+            if hasattr(block, 'cross_attn'):
+                if hasattr(block.cross_attn, 'q_linear'):
+                    self._add_lora_to_linear(block.cross_attn.q_linear, rank, alpha, dropout)
+                if hasattr(block.cross_attn, 'kv_linear'):
+                    self._add_lora_to_linear(block.cross_attn.kv_linear, rank, alpha, dropout)
+                if hasattr(block.cross_attn, 'proj'):
+                    self._add_lora_to_linear(block.cross_attn.proj, rank, alpha, dropout)
+            
+            # Apply LoRA to MLP layers
+            if hasattr(block, 'mlp'):
+                if hasattr(block.mlp, 'fc1'):
+                    self._add_lora_to_linear(block.mlp.fc1, rank, alpha, dropout)
+                if hasattr(block.mlp, 'fc2'):
+                    self._add_lora_to_linear(block.mlp.fc2, rank, alpha, dropout)
+
+    def _add_lora_to_linear(self, linear_layer, rank, alpha, dropout=0.0):
+        """Add LoRA matrices to a linear layer."""
+        if not isinstance(linear_layer, nn.Linear):
+            return
+        
+        in_features = linear_layer.in_features
+        out_features = linear_layer.out_features
+        
+        # Freeze the original weights
+        linear_layer.weight.requires_grad = False
+        if linear_layer.bias is not None:
+            linear_layer.bias.requires_grad = False
+        
+        # Create LoRA matrices
+        lora_A = nn.Parameter(torch.zeros(rank, in_features))
+        lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        
+        # Initialize LoRA matrices
+        nn.init.kaiming_uniform_(lora_A, a=math.sqrt(5))
+        nn.init.zeros_(lora_B)
+        
+        # Register as parameters
+        linear_layer.lora_A = lora_A
+        linear_layer.lora_B = lora_B
+        linear_layer.lora_alpha = alpha
+        linear_layer.lora_rank = rank
+        linear_layer.lora_dropout = nn.Dropout(p=dropout) if dropout > 0 else None
+        linear_layer.scaling = alpha / rank
+        
+        # Monkey-patch the forward method
+        original_forward = linear_layer.forward
+        
+        def lora_forward(x):
+            result = original_forward(x)
+            if hasattr(linear_layer, 'lora_A') and hasattr(linear_layer, 'lora_B'):
+                lora_x = x
+                if linear_layer.lora_dropout is not None:
+                    lora_x = linear_layer.lora_dropout(lora_x)
+                lora_out = (lora_x @ linear_layer.lora_A.T) @ linear_layer.lora_B.T
+                result = result + lora_out * linear_layer.scaling
+            return result
+        
+        linear_layer.forward = lora_forward
 
     def forward(
         self,

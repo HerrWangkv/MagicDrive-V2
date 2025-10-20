@@ -268,8 +268,9 @@ model = dict(
     ),
     control_skip_cross_view=True,
     control_skip_temporal=False,  # CHANGED
-    only_train_brushnet_blocks=True,
+    only_train_extra_blocks=True,
     brushnet_skip_cross_attn=True,
+    use_lora_base_blocks=True,
     # load pretrained
     # from_pretrained="./pretrained/hpcai-tech/OpenSora-STDiT-v3",
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
@@ -338,9 +339,8 @@ ckpt_every = 1000
 report_every = ckpt_every
 
 # optimization settings
-load = "./outputs/MagicDriveSTDiT3-XL-2-BrushNet_brushnet_20251015-0830/epoch0-global_step4000"
+load = None
 grad_clip = 1.0
-reset_lr = True
 lr = 2e-5
 ema_decay = 0.99
 adam_eps = 1e-15
