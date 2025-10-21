@@ -503,8 +503,6 @@ def main():
                     x = rearrange(x, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
                     human_mask = batch.pop("human_masks").to(device, dtype)
                     human_mask = rearrange(human_mask, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
-                    if (human_mask == 0).all():
-                        continue
                     x_human = torch.where(human_mask > 0.5, x, torch.ones_like(x)) # white background ##TODO:save and check
                     y = batch.pop("captions")[0]  # B, just take first frame
                     maps = batch.pop("bev_map_with_aux").to(device, dtype)  # B, T, C, H, W
