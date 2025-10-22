@@ -6,7 +6,7 @@ bbox_mode = 'all-xyz'
 data_cfg_names = [
     ((224, 400), "Nuscenes_map_cache_box_t_with_n2t_12Hz_brushnet"),
     ((424, 800), "Nuscenes_400_map_cache_box_t_with_n2t_12Hz_brushnet"),
-    # ((848, 1600), "Nuscenes_400_map_cache_box_t_with_n2t_12Hz_848x1600"),
+    ((848, 1600), "Nuscenes_400_map_cache_box_t_with_n2t_12Hz_848x1600_brushnet"),
 ]
 video_lengths_fps = {  # all lengths are 8n or 8n+1
     "224x400": [
@@ -51,11 +51,25 @@ video_lengths_fps = {  # all lengths are 8n or 8n+1
         ],
         [1, 1, 1, 1, 1],
     ],
-    # "848x1600": [
-    #     [1, 9, 17, 33,],
-    #     [[120,], [12,], [12], [12],],
-    #     [1, 1, 1, 1],
-    # ]
+    "848x1600": [
+        [
+            1,
+            9,
+            17,
+            33,
+        ],
+        [
+            [
+                120,
+            ],
+            [
+                12,
+            ],
+            [12],
+            [12],
+        ],
+        [1, 1, 1, 1],
+    ],
 }
 balance_keywords = ["night", "rain", "none"]
 dataset_cfg_overrides = [
@@ -100,19 +114,25 @@ dataset_cfg_overrides = [
         ("dataset.data.val.video_length", video_lengths_fps["424x800"][0]),
         ("dataset.data.val.fps", video_lengths_fps["424x800"][1]),
     ),
-    # (
-    #     # key, value
-    #     ("dataset.data.train.ann_file", "./data/nuscenes_mmdet3d-12Hz/nuscenes_interp_12Hz_infos_train_with_bid.pkl"),
-    #     ("dataset.data.val.ann_file", "./data/nuscenes_mmdet3d-12Hz/nuscenes_interp_12Hz_infos_val_with_bid.pkl"),
-    #     ("dataset.data.train.type", "NuScenesVariableDataset"),
-    #     ("dataset.data.val.type", "NuScenesVariableDataset"),
-    #     ("dataset.data.train.video_length", video_lengths_fps["848x1600"][0]),
-    #     ("dataset.data.train.fps", video_lengths_fps["848x1600"][1]),
-    #     ("+dataset.data.train.repeat_times", video_lengths_fps["848x1600"][2]),
-    #     ("+dataset.data.train.balance_keywords", balance_keywords),
-    #     ("dataset.data.val.video_length", video_lengths_fps["848x1600"][0]),
-    #     ("dataset.data.val.fps", video_lengths_fps["848x1600"][1]),
-    # ),
+    (
+        # key, value
+        (
+            "dataset.data.train.ann_file",
+            "./data/nuscenes_mmdet3d-12Hz/nuscenes_interp_12Hz_infos_train_with_bid.pkl",
+        ),
+        (
+            "dataset.data.val.ann_file",
+            "./data/nuscenes_mmdet3d-12Hz/nuscenes_interp_12Hz_infos_val_with_bid.pkl",
+        ),
+        ("dataset.data.train.type", "NuScenesVariableDataset"),
+        ("dataset.data.val.type", "NuScenesVariableDataset"),
+        ("dataset.data.train.video_length", video_lengths_fps["848x1600"][0]),
+        ("dataset.data.train.fps", video_lengths_fps["848x1600"][1]),
+        ("+dataset.data.train.repeat_times", video_lengths_fps["848x1600"][2]),
+        ("+dataset.data.train.balance_keywords", balance_keywords),
+        ("dataset.data.val.video_length", video_lengths_fps["848x1600"][0]),
+        ("dataset.data.val.fps", video_lengths_fps["848x1600"][1]),
+    ),
 ]
 
 img_collate_param_train = dict(
@@ -147,22 +167,24 @@ bucket_config = {
 # no need to change this!
 
 validation_index = [
-    # "1828-424-800-12-33",
-    # "5543-424-800-12-33",
-    "6720-424-800-12-33",
-    # "14449-424-800-12-33",
-    # "5538-424-800-12-65",
-    "14631-424-800-12-65",
-    # "6720-424-800-12-65",
-    # "14449-424-800-12-65",
-    # "3649-424-800-12-65",  # know
-    # "912-424-800-12-129",
+    #  "1828-848-1600-12-17",
+    #  "5543-848-1600-12-17",
+    "6720-848-1600-12-17",
+    # "14449-848-1600-12-17",
+    #  "5538-848-1600-12-33",
+    "14631-848-1600-12-33",
+    #  "6720-848-1600-12-33",
+    # "14449-848-1600-12-33",
+    #  "3649-848-1600-12-33",  # know
+    #  "912-424-800-12-129",
     # "1680-424-800-12-129",
     "3657-424-800-12-129",
     "24-224-400-12-full",
     # "145-224-400-12-full",
     # "105-224-400-12-full",
-    # "8726-848-1600-60-1",
+    # "8726-848-1600-120-1",
+    # "5543-424-800-12-33",  # know
+    # "5543-848-1600-12-33",  # know
 ]
 validation_before_run = False  # just don't use it!
 
@@ -276,7 +298,7 @@ model = dict(
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
 )
 
-partial_load="./outputs/MagicDriveSTDiT3-XL-2-BrushNet_brushnet_20251018-1419/epoch0-global_step10000"
+partial_load = "./ckpts/MagicDriveDiT-stage3-40k-ft"
 
 
 vae = dict(
@@ -339,7 +361,7 @@ ckpt_every = 1000
 report_every = ckpt_every
 
 # optimization settings
-load = None
+load = "./outputs/MagicDriveSTDiT3-XL-2-BrushNet_brushnet_20251020-1316/epoch0-global_step5000"
 grad_clip = 1.0
 lr = 2e-5
 ema_decay = 0.99
