@@ -172,14 +172,14 @@ validation_index = [
     "6720-848-1600-12-17",
     # "14449-848-1600-12-17",
     #  "5538-848-1600-12-33",
-    "14631-848-1600-12-33",
+    # "14631-848-1600-12-33",
     #  "6720-848-1600-12-33",
     # "14449-848-1600-12-33",
     #  "3649-848-1600-12-33",  # know
     #  "912-424-800-12-129",
     # "1680-424-800-12-129",
-    "3657-424-800-12-129",
-    "24-224-400-12-full",
+    # "3657-424-800-12-129",
+    # "24-224-400-12-full",
     # "145-224-400-12-full",
     # "105-224-400-12-full",
     # "8726-848-1600-120-1",
@@ -361,7 +361,7 @@ ckpt_every = 1000
 report_every = ckpt_every
 
 # optimization settings
-load = "./outputs/MagicDriveSTDiT3-XL-2-BrushNet_brushnet_20251020-1316/epoch0-global_step5000"
+load = "./outputs/MagicDriveSTDiT3-XL-2-BrushNet_brushnet_20251022-1002/epoch0-global_step6000"
 grad_clip = 1.0
 lr = 2e-5
 ema_decay = 0.99

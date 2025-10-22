@@ -13,7 +13,7 @@ from einops import rearrange, repeat
 from colossalai.cluster import DistCoordinator, ProcessGroupMesh
 from colossalai.booster.plugin import LowLevelZeroPlugin
 
-from magicdrivedit.acceleration.parallel_states import set_data_parallel_group, set_sequence_parallel_group, get_data_parallel_group
+from magicdrivedit.acceleration.parallel_states import set_data_parallel_group, set_sequence_parallel_group, get_data_parallel_group, get_sequence_parallel_group
 from magicdrivedit.acceleration.plugin import ZeroSeqParallelPlugin
 from magicdrivedit.registry import SCHEDULERS, build_module
 from magicdrivedit.datasets import save_sample
@@ -153,7 +153,14 @@ def run_brushnet_validation(
                 mask=None,
             )
             samples = rearrange(samples, "B (C NC) T ... -> (B NC) C T ...", NC=NC)
-            samples = vae.decode(samples.to(dtype), num_frames=T)
+            model.to("cpu")
+            text_encoder.t5.model.to("cpu")
+            vae.module.encoder.to("cpu")
+            torch.cuda.empty_cache()
+            samples = sp_vae(samples.to(dtype), partial(vae.decode, num_frames=T), get_sequence_parallel_group())
+            model.to(device)
+            text_encoder.t5.model.to(device)
+            vae.module.encoder.to(device)
             samples = rearrange(samples, "(B NC) C T ... -> B NC C T ...", NC=NC)
             if val_cfg.cpu_offload:
                 last_hook.offload()
