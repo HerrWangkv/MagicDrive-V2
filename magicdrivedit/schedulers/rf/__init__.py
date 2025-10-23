@@ -386,6 +386,7 @@ class RFLOW_BRUSHNET_SLICE(RFLOW_BRUSHNET):
 
         n = len(prompts)
         # text encoding
+        original_text_encoder_device = text_encoder.t5.model.device
         model_args = text_encoder.encode(prompts)
         if additional_args is not None:
             model_args.update(additional_args)
@@ -393,7 +394,8 @@ class RFLOW_BRUSHNET_SLICE(RFLOW_BRUSHNET):
             y_null = text_encoder.encode(neg_prompts)["y"]
         else:
             y_null = text_encoder.null(n).to(device)
-
+        text_encoder.t5.model.to(original_text_encoder_device)
+        torch.cuda.empty_cache()
         # prepare timesteps
         timesteps = [
             (1.0 - i / self.num_sampling_steps) * self.num_timesteps
@@ -418,6 +420,7 @@ class RFLOW_BRUSHNET_SLICE(RFLOW_BRUSHNET):
             noise_added = noise_added | (mask == 1)
 
         progress_wrap = partial(tqdm, leave=False) if progress else (lambda x: x)
+        original_model_device = model.device
         for i, t in progress_wrap(enumerate(timesteps)):
             # mask for adding noise
             if mask is not None:
@@ -475,7 +478,8 @@ class RFLOW_BRUSHNET_SLICE(RFLOW_BRUSHNET):
 
             if mask is not None:
                 z = torch.where(mask_t_upper[:, None, :, None, None], z, x0)
-
+        model.to(original_model_device)
+        torch.cuda.empty_cache()
         return z
 
 

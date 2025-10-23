@@ -1278,16 +1278,27 @@ class ShallowEncoder(nn.Module):
             padding=(temporal_downsample // 2, 0, 0),  # (2, 0, 0)
         )
 
-    def forward(self, x):
+    def forward(self, x, chunk_size=64):
         # x: (BxNC, C, T, H, W) where T = 4t+1
+        # Process frames in chunks to avoid OOM
         B_NC, C, T, H, W = x.shape
 
-        # Spatial downsampling: process each frame independently
+        # Spatial downsampling: process frames in chunks
         x = rearrange(x, "b c t h w -> (b t) c h w")
-        x = self.relu(self.conv1(x))  # -> (b*t, 64, h/2, w/2)
-        x = self.relu(self.conv2(x))  # -> (b*t, 128, h/4, w/4)
-        x = self.relu(self.conv3(x))  # -> (b*t, 256, h/8, w/8)
-        x = self.conv4(x)  # -> (b*t, out_channels, h/8, w/8)
+        
+        # Process in chunks to avoid massive memory allocation
+        total_frames = x.shape[0]
+        chunks = []
+        
+        for i in range(0, total_frames, chunk_size):
+            chunk = x[i:i+chunk_size]
+            chunk = self.relu(self.conv1(chunk))  # -> (chunk, 64, h/2, w/2)
+            chunk = self.relu(self.conv2(chunk))  # -> (chunk, 128, h/4, w/4)
+            chunk = self.relu(self.conv3(chunk))  # -> (chunk, 256, h/8, w/8)
+            chunk = self.conv4(chunk)  # -> (chunk, out_channels, h/8, w/8)
+            chunks.append(chunk)
+            
+        x = torch.cat(chunks, dim=0)
         x = rearrange(x, "(b t) c h w -> b c t h w", b=B_NC, t=T)
 
         # Temporal downsampling: reduce from 4t+1 frames to t frames

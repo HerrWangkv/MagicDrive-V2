@@ -92,12 +92,14 @@ def set_omegaconf_key_value(cfg, key, value):
     node[m] = value
 
 
-def load_video_frames(video_path: Union[str, Path]) -> torch.Tensor:
+def load_video_frames(video_path: Union[str, Path], grayscale=False, dtype=torch.float32) -> torch.Tensor:
     """
     Load video frames from a video file using torchvision.
 
     Args:
         video_path: Path to the video file
+        grayscale: Whether to convert to grayscale
+        dtype: Target dtype for the output tensor (default: torch.float32)
 
     Returns:
         torch.Tensor: Video frames tensor
@@ -115,16 +117,12 @@ def load_video_frames(video_path: Union[str, Path]) -> torch.Tensor:
     # torchvision returns (T, H, W, C), convert to (T, C, H, W)
     video_tensor = video_tensor.permute(0, 3, 1, 2)
 
-    # Convert to float and normalize from [0, 255] to [0, 1]
-    video_tensor = video_tensor.float() / 255.0
+    # Convert to target dtype and normalize from [0, 255] to [0, 1]
+    video_tensor = video_tensor.to(dtype) / 255.0
     # Handle grayscale videos (convert 3-channel grayscale to 1-channel)
-    if video_tensor.shape[1] == 3:
-        # Check if it's actually grayscale (all channels are the same)
-        if torch.allclose(video_tensor[:, 0], video_tensor[:, 1]) and torch.allclose(
-            video_tensor[:, 1], video_tensor[:, 2]
-        ):
-            video_tensor = video_tensor[:, :1]  # Keep only first channel
-            video_tensor = (video_tensor > 0.5).float()
+    if video_tensor.shape[1] == 3 and grayscale:
+        video_tensor = video_tensor[:, :1]  # Keep only first channel
+        video_tensor = (video_tensor > 0.5).to(dtype)
     return video_tensor
 
 def main():
@@ -415,6 +413,11 @@ def main():
             model_args["height"] = batch.pop("height")
             model_args["width"] = batch.pop("width")
             model_args["num_frames"] = batch.pop("num_frames")
+            
+            # Clean up batch dict after extracting all needed data
+            del batch
+            gc.collect()
+            torch.cuda.empty_cache()
             model_args = move_to(model_args, device=device, dtype=dtype)
             # no need to move these
             model_args["mv_order_map"] = cfg.get("mv_order_map")
@@ -474,11 +477,11 @@ def main():
                 z = torch.randn(len(batch_prompts), vae.out_channels * NC, *latent_size, device=device, dtype=dtype)
 
                 assert B == 1, "Only support bs=1 for pedestrian repainting"
-                pedestrian_video_dir = "data/val_videos_12hz"  # TODO: config this
+                pedestrian_video_dir = cfg.get("pedestrian_video_dir", "data/val_videos_12hz")
                 pedestrian_video_path = os.path.join(
-                    pedestrian_video_dir, f"{validation_index[i]}/rgbs.mp4"
+                    pedestrian_video_dir, f"{validation_index[i]}/rgbs_wo_background.mp4"
                 )
-                pedestrian_frames = load_video_frames(pedestrian_video_path)
+                pedestrian_frames = load_video_frames(pedestrian_video_path, dtype=dtype)
                 pedestrian_frames = pedestrian_frames[
                     : int(model_args["num_frames"]), ...
                 ].to(device)
@@ -487,7 +490,7 @@ def main():
                 w = WIDTH // 3
                 assert (
                     h == model_args["height"][0] and w == model_args["width"][0]
-                ), f"Pedestrian video size {(HEIGHT, WIDTH)} not match model required size {(model_args['height'][0], model_args['width'][0])}"
+                ), f"Pedestrian video size {(h, w)} not match model required size {(model_args['height'][0], model_args['width'][0])}"
                 pedestrian_frames = torch.concat(
                     [
                         pedestrian_frames[:, :, :h, :],
@@ -498,17 +501,13 @@ def main():
                 pedestrian_frames = rearrange(
                     pedestrian_frames, "T C H (NC W) -> NC C T H W", W=w
                 )  # NC, C, T, H, W
-                # Swap pedestrian_frames[3] and pedestrian_frames[5]
-                tmp = pedestrian_frames[3].clone()
-                pedestrian_frames[3] = pedestrian_frames[5]
-                pedestrian_frames[5] = tmp
                 pedestrian_frames = pedestrian_frames * 2 - 1  # [0, 1] -> [-1, 1]
 
                 pedestrian_mask_video_path = os.path.join(
                     pedestrian_video_dir, f"{validation_index[i]}/masks.mp4"
                 )
                 pedestrian_mask_frames = load_video_frames(
-                    pedestrian_mask_video_path
+                    pedestrian_mask_video_path, grayscale=True, dtype=dtype
                 )
                 pedestrian_mask_frames = pedestrian_mask_frames[
                     : int(model_args["num_frames"]), ...
@@ -523,31 +522,23 @@ def main():
                 pedestrian_mask_frames = rearrange(
                     pedestrian_mask_frames, "T 1 H (NC W) -> NC 1 T H W", W=w
                 )  # NC, 1, T, H, W
-                tmp = pedestrian_mask_frames[3].clone()
-                pedestrian_mask_frames[3] = pedestrian_mask_frames[5]
-                pedestrian_mask_frames[5] = tmp
-                if cfg.sp_size > 1:
-                    z_pedestrian = sp_vae(
-                        pedestrian_frames.to(dtype),
-                        partial(vae.encode),
-                        get_sequence_parallel_group(),
-                    )
-                else:
-                    z_pedestrian = vae.encode(pedestrian_frames.to(dtype))
                 z_pedestrian = rearrange(
-                    z_pedestrian, "(B NC) C T ... -> B (C NC) T ...", NC=NC
+                    pedestrian_frames, "(B NC) C T ... -> B (C NC) T ...", NC=NC
                 )
+                
+                # Free memory after processing pedestrian frames
+                del pedestrian_frames
+                torch.cuda.empty_cache()
 
-                pedestrian_mask_frames = rearrange(
+                mask_pedestrian = rearrange(
                     pedestrian_mask_frames,
                     "(B NC) C T ... -> B (C NC) T  ...",
                     NC=NC,
                 )
-                mask_pedestrian = F.interpolate(
-                    pedestrian_mask_frames.to(dtype),
-                    size=z_pedestrian.shape[-3:],
-                    mode="nearest",
-                )
+                
+                # Free memory after processing mask frames
+                del pedestrian_mask_frames
+                torch.cuda.empty_cache()
                 # == sample box ==
                 if bbox is not None:
                     # null set values to all zeros, this should be safe
@@ -588,6 +579,11 @@ def main():
                     progress=verbose >= 1,
                     mask=masks,
                 )
+                
+                # Clean up after sampling
+                del z, z_pedestrian, mask_pedestrian, masks
+                torch.cuda.empty_cache()
+                
                 samples = rearrange(samples, "B (C NC) T ... -> (B NC) C T ...", NC=NC)
                 if cfg.sp_size > 1:
                     samples = sp_vae(
@@ -609,7 +605,9 @@ def main():
                     samples = torch.stack(vid_samples, dim=0)
                     video_clips.append(samples)
                     del vid_samples
+                    torch.cuda.empty_cache()
                 del samples
+                torch.cuda.empty_cache()
                 coordinator.block_all()
 
                 # == save samples ==
@@ -632,7 +630,10 @@ def main():
                             save_per_n_frame=cfg.get("save_per_n_frame", -1),
                             force_image=cfg.get("force_image", False),
                         )
+                        del video
+                    torch.cuda.empty_cache()
                 del video_clips
+                torch.cuda.empty_cache()
                 coordinator.block_all()
 
             # save_gt
@@ -650,9 +651,20 @@ def main():
                         save_per_n_frame=cfg.get("save_per_n_frame", -1),
                         force_image=cfg.get("force_image", False),
                     )
-                del samples, vid_sample
+                    del vid_sample
+                del samples
+                torch.cuda.empty_cache()
+            
+            # Clean up loop variables
+            num_prompts = len(batch_prompts)
+            del y, maps, bbox, cams, rel_pos, model_args, batch_prompts, ms, refs, save_fps
+            if not cfg.ignore_ori_imgs:
+                del x
             coordinator.block_all()
-            start_idx += len(batch_prompts)
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+            start_idx += num_prompts
     logger.info("Inference finished.")
     logger.info("Saved %s samples to %s", start_idx - cfg.get("start_index", 0), save_dir)
     coordinator.destroy()
