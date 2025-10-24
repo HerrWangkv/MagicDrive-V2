@@ -2059,7 +2059,7 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
             f"noise_inpaint_encoded shape {noise_inpaint_encoded.shape} does not match x_inpaint_encoded shape {x_inpaint_encoded.shape}!"
         # Add noise to x_inpaint_encoded according to timestep_inpaint
         x_inpaint_encoded = self.add_noise(
-            x_inpaint_encoded, noise_inpaint_encoded, timestep_inpaint, num_timesteps
+            x_inpaint_encoded, noise_inpaint_encoded, repeat(timestep_inpaint, 'b -> (b NC)', NC=NC), num_timesteps
         ).to(dtype)
         # Interpolate mask_inpaint to match x's spatial dimensions (latent space)
         # mask_inpaint is at original resolution, needs to be downsampled to match x
