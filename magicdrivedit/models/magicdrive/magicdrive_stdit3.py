@@ -1874,7 +1874,7 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
     
     def __init__(self, config: MagicDriveSTDiT3Config):
         
-        MagicDriveSTDiT3.__init__(config)
+        MagicDriveSTDiT3.__init__(self, config)
         drop_path = [x.item() for x in torch.linspace(0, config.drop_path, self.depth)]
 
         # Add shallow encoder for encoding human-masked images
@@ -1972,6 +1972,25 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
                 param.requires_grad = True
             logging.info(f"Only train brushnet blocks, shallow encoder, t blocks and lora parameters!")
        
+    def add_noise(
+        self,
+        original_samples: torch.FloatTensor,
+        noise: torch.FloatTensor,
+        timesteps: torch.IntTensor,
+        num_timesteps,
+    ) -> torch.FloatTensor:
+        """
+        compatible with diffusers add_noise()
+        """
+        timepoints = timesteps.float() / num_timesteps
+        timepoints = 1 - timepoints  # [1,1/1000]
+
+        # timepoint  (bsz) noise: (bsz, 4, frame, w ,h)
+        # expand timepoint to noise shape
+        timepoints = timepoints.unsqueeze(1).unsqueeze(1).unsqueeze(1).unsqueeze(1)
+        timepoints = timepoints.repeat(1, noise.shape[1], noise.shape[2], noise.shape[3], noise.shape[4])
+
+        return timepoints * original_samples + (1 - timepoints) * noise
     
     def forward(
         self,
@@ -1980,6 +1999,7 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
         mask_inpaint,
         timestep,
         timestep_inpaint,
+        num_timesteps,
         y,
         maps,
         bbox,
@@ -1988,6 +2008,7 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
         fps,
         height,
         width,
+        noise_inpaint_encoded=None,
         drop_cond_mask=None,
         drop_frame_mask=None,
         mv_order_map=None,
@@ -2032,7 +2053,14 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
         # x_inpaint: (B NC) 3 T H W -> shallow_encoder -> (B NC) C T H/8 W/8
         # This makes x_inpaint_encoded have the same spatial dimensions as x
         x_inpaint_encoded = self.shallow_encoder(x_inpaint)
-
+        if noise_inpaint_encoded is None:
+            noise_inpaint_encoded = torch.randn_like(x_inpaint_encoded)
+        assert noise_inpaint_encoded.shape == x_inpaint_encoded.shape, \
+            f"noise_inpaint_encoded shape {noise_inpaint_encoded.shape} does not match x_inpaint_encoded shape {x_inpaint_encoded.shape}!"
+        # Add noise to x_inpaint_encoded according to timestep_inpaint
+        x_inpaint_encoded = self.add_noise(
+            x_inpaint_encoded, noise_inpaint_encoded, timestep_inpaint, num_timesteps
+        ).to(dtype)
         # Interpolate mask_inpaint to match x's spatial dimensions (latent space)
         # mask_inpaint is at original resolution, needs to be downsampled to match x
         mask_inpaint = F.interpolate(
@@ -2154,7 +2182,6 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
             t0_inpaint_mlp = self.t_inpaint_block(t0)
             t0_combined = torch.cat([t0_mlp, t0_inpaint_mlp], dim=-1)
             t0_combined_mlp = self.t_combine_block(t0_combined)
-
         # === get y embed ===
         # we need to remove the T dim in y
         # rel_pos & bbox: T -> 1

@@ -210,7 +210,6 @@ class RFLOW_BRUSHNET(RFLOW):
 
                 z = torch.where(mask_add_noise[:, None, :, None, None], x_noise, x0)
                 noise_added = mask_t_upper
-
             # classifier-free guidance
             z_in = torch.cat([z, z], 0)
             t = torch.cat([t, t], 0)
@@ -363,18 +362,19 @@ class RFLOW_SDEBRUSHNET(RFLOW):
                 noise_added = mask_t_upper
 
             # Add controlled noise to z_inpaint
-            # Scale the timestep for z_inpaint noise level
-            t_inpaint = t * inpaint_noise_scale
-            noise_inpaint = torch.randn_like(z_inpaint)
-            z_inpaint_noisy = self.scheduler.add_noise(z_inpaint, noise_inpaint, t_inpaint)
+            # Create independent timestep for inpaint based on noise scale
+            # t_inpaint represents the noise level to add to z_inpaint (independent of diffusion timestep t)
+            t_inpaint = torch.tensor([inpaint_noise_scale * self.num_timesteps] * z.shape[0], device=device)
+            noise_inpaint_encoded = torch.randn_like(z)
 
             # classifier-free guidance
             z_in = torch.cat([z, z], 0)
             t = torch.cat([t, t], 0)
-            z_inpaint_in = torch.cat([z_inpaint_noisy, z_inpaint_noisy], 0)
+            z_inpaint_in = torch.cat([z_inpaint, z_inpaint], 0)
             t_inpaint = torch.cat([t_inpaint, t_inpaint], 0)
             mask_inpaint_in = torch.cat([mask_inpaint, mask_inpaint], 0)
-            pred = model(z_in, z_inpaint_in, mask_inpaint_in, t, t_inpaint, **model_args)
+            noise_inpaint_encoded_in = torch.cat([noise_inpaint_encoded, noise_inpaint_encoded], 0)
+            pred = model(z_in, z_inpaint_in, mask_inpaint_in, t, t_inpaint, self.num_timesteps, noise_inpaint_encoded=noise_inpaint_encoded_in, **model_args)
             if pred.shape[1] == z_in.shape[1] * 2:
                 pred = pred.chunk(2, dim=1)[0]
             else:
@@ -404,12 +404,11 @@ class RFLOW_SDEBRUSHNET(RFLOW):
         mask_inpaint,
         model_kwargs=None,
         noise=None,
-        noise_inpaint=None,
         mask=None,
         weights=None,
         t=None,
         t_inpaint=None,
-    ):
+    ):  
         return self.scheduler.training_losses(
             model,
             x_start,
@@ -417,7 +416,6 @@ class RFLOW_SDEBRUSHNET(RFLOW):
             mask_inpaint,
             model_kwargs,
             noise,
-            noise_inpaint,
             mask,
             weights,
             t,

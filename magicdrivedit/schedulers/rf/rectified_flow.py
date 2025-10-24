@@ -254,7 +254,6 @@ class RFlowSchedulerSDEBrushNet(RFlowScheduler):
         mask_inpaint,
         model_kwargs=None,
         noise=None,
-        noise_inpaint=None,
         mask=None,
         weights=None,
         t=None,
@@ -266,7 +265,6 @@ class RFlowSchedulerSDEBrushNet(RFlowScheduler):
         Note: t is int tensor and should be rescaled from [0, num_timesteps-1] to [1,0]
         
         Args:
-            noise_inpaint: Independent noise for x_inpaint. If None, will be generated independently.
             t_inpaint: Independent timestep for x_inpaint. If None, will be sampled independently.
         """
         if t is None:
@@ -290,7 +288,6 @@ class RFlowSchedulerSDEBrushNet(RFlowScheduler):
                     num_timesteps=self.num_timesteps,
                     cog_style=self.cog_style_trans,
                 )
-
         # Sample independent timestep for x_inpaint
         if t_inpaint is None:
             if self.use_discrete_timesteps:
@@ -320,22 +317,14 @@ class RFlowSchedulerSDEBrushNet(RFlowScheduler):
             noise = torch.randn_like(x_start)
         assert noise.shape == x_start.shape
 
-        # Generate independent noise for x_inpaint
-        if noise_inpaint is None:
-            noise_inpaint = torch.randn_like(x_inpaint)
-        assert noise_inpaint.shape == x_inpaint.shape
-
         x_t = self.add_noise(x_start, noise, t)
         if mask is not None:
             t0 = torch.zeros_like(t)
             x_t0 = self.add_noise(x_start, noise, t0)
             x_t = torch.where(mask[:, None, :, None, None], x_t, x_t0)
 
-        # Add independent noise to x_inpaint with independent timestep
-        x_inpaint_noisy = self.add_noise(x_inpaint, noise_inpaint, t_inpaint)
-
         terms = {}
-        model_output = model(x_t, x_inpaint_noisy, mask_inpaint, t, t_inpaint, **model_kwargs)
+        model_output = model(x_t, x_inpaint, mask_inpaint, t, t_inpaint, num_timesteps=self.num_timesteps, **model_kwargs)
         if model_output.shape[1] == 2 * x_t.shape[1]:
             model_output = model_output.chunk(2, dim=1)[0]
         velocity_pred = model_output
