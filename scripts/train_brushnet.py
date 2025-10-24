@@ -721,24 +721,24 @@ def main():
                 if report_every > 0 and (global_step + 1) % report_every == 0:
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
-                    val_dir = run_brushnet_validation(
-                        cfg.val,
-                        text_encoder,
-                        vae,
-                        model,
-                        device,
-                        dtype,
-                        val_dataloader,
-                        coordinator,
-                        global_step + 1,
-                        exp_dir,
-                        cfg.mv_order_map,
-                        cfg.t_order_map,
-                    )
+                    # val_dir = run_brushnet_validation(
+                    #     cfg.val,
+                    #     text_encoder,
+                    #     vae,
+                    #     model,
+                    #     device,
+                    #     dtype,
+                    #     val_dataloader,
+                    #     coordinator,
+                    #     global_step + 1,
+                    #     exp_dir,
+                    #     cfg.mv_order_map,
+                    #     cfg.t_order_map,
+                    # )
                     val_sampler.reset()
                     torch.cuda.synchronize()
                     torch.cuda.empty_cache()
-                    sub_dir_name = os.path.basename(val_dir)
+                    # sub_dir_name = os.path.basename(val_dir)
 
                 if record_time:
                     misc_t.__exit__(*sys.exc_info())
