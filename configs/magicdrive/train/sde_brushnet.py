@@ -298,7 +298,7 @@ model = dict(
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
 )
 
-partial_load = "./ckpts/MagicDriveDiT-stage3-40k-ft"
+partial_load = "./outputs/MagicDriveSTDiT3-XL-2-BrushNet_brushnet_20251024-0927/epoch0-global_step10000"
 
 
 vae = dict(

@@ -2172,7 +2172,7 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
         t_combined = torch.cat([t_mlp, t_inpaint_mlp], dim=-1)
         t_combined_mlp = self.t_combine_block(t_combined)
         
-        t0 = t0_mlp = t0_inpaint_mlp = None
+        t0 = t0_mlp = t0_inpaint_mlp = t0_combined_mlp = None
         if x_mask is not None:
             t0_timestep = torch.zeros_like(timestep)
             t0 = self.t_embedder(t0_timestep, dtype=x.dtype)
