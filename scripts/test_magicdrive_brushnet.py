@@ -1,16 +1,13 @@
 import os
 import gc
 import sys
-import time
 import copy
 from pprint import pformat
-from datetime import timedelta
 from functools import partial
 from typing import Union
 from pathlib import Path
 from torchvision.io import read_video
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 sys.path.append(".")
 DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "gpu")
 
@@ -34,31 +31,27 @@ import magicdrivedit.utils.module_contrib
 
 import colossalai
 import torch.distributed as dist
-import torch.nn.functional as F
-from torch.utils.data import Subset
+import torchvision.transforms as TF
 from einops import rearrange, repeat
 from colossalai.cluster import DistCoordinator, ProcessGroupMesh
 from mmengine.runner import set_random_seed
 from tqdm import tqdm
-from hydra import compose, initialize
-from omegaconf import OmegaConf
 from mmcv.parallel import DataContainer
+from nuscenes.nuscenes import NuScenes
+from nuscenes.utils import splits
 
+from magicdrivedit.acceleration.communications import gather_tensors, serialize_state, deserialize_state
 from magicdrivedit.acceleration.parallel_states import (
     set_sequence_parallel_group,
     get_sequence_parallel_group,
     set_data_parallel_group,
-    get_data_parallel_group
+    get_data_parallel_group,
 )
 from magicdrivedit.datasets import save_sample
 from magicdrivedit.datasets.dataloader import prepare_dataloader
-from magicdrivedit.datasets.dataloader import prepare_dataloader
-from magicdrivedit.models.text_encoder.t5 import text_preprocessing
 from magicdrivedit.registry import DATASETS, MODELS, SCHEDULERS, build_module
 from magicdrivedit.utils.config_utils import parse_configs, define_experiment_workspace, save_training_config, merge_dataset_cfg, mmengine_conf_get, mmengine_conf_set
 from magicdrivedit.utils.inference_utils import (
-    apply_mask_strategy,
-    get_save_path_name,
     concat_6_views_pt,
     add_null_condition,
     enable_offload,
@@ -66,7 +59,6 @@ from magicdrivedit.utils.inference_utils import (
 from magicdrivedit.utils.misc import (
     reset_logger,
     is_distributed,
-    is_main_process,
     to_torch_dtype,
     collate_bboxes_to_maxlen,
     move_to,
@@ -74,14 +66,18 @@ from magicdrivedit.utils.misc import (
 )
 from magicdrivedit.utils.train_utils import sp_vae
 
+VIEW_ORDER = [
+    "CAM_FRONT_LEFT",
+    "CAM_FRONT",
+    "CAM_FRONT_RIGHT",
+    "CAM_BACK_RIGHT",
+    "CAM_BACK",
+    "CAM_BACK_LEFT",
+]
 
-TILING_PARAM = {
-    "default": dict(),  # it is designed for CogVideoX's 720x480, 4.5 GB
-    "384": dict(  # about 14.2 GB
-        tile_sample_min_height = 384,  # should be 48n
-        tile_sample_min_width = 720,  # should be 40n
-    ),
-}
+
+def make_file_dirs(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
 
 
 def set_omegaconf_key_value(cfg, key, value):
@@ -124,6 +120,7 @@ def load_video_frames(video_path: Union[str, Path], grayscale=False, dtype=torch
         video_tensor = video_tensor[:, :1]  # Keep only first channel
         video_tensor = (video_tensor > 0.5).to(dtype)
     return video_tensor
+
 
 def main():
     torch.set_grad_enabled(False)
@@ -169,20 +166,14 @@ def main():
             d[1].img_collate_param.is_train = False  # Important!
     cfg.batch_size = 1
     # for lower cpu memory in dataloading
-    cfg.ignore_ori_imgs = cfg.get("ignore_ori_imgs", True)
+    cfg.ignore_ori_imgs = cfg.get("ignore_ori_imgs", False)
     if cfg.ignore_ori_imgs:
         cfg.dataset.drop_ori_imgs = True
-
-    # for lower gpu memory in vae decoding
-    cfg.vae_tiling = cfg.get("vae_tiling", None)
-
-    # edit annotations
-    if cfg.get("allow_class", None) != None:
-        cfg.dataset.allow_class = cfg.allow_class
-    if cfg.get("del_box_ratio", None) != None:
-        cfg.dataset.del_box_ratio = cfg.del_box_ratio
-    if cfg.get("drop_nearest_car", None) != None:
-        cfg.dataset.drop_nearest_car = cfg.drop_nearest_car
+    # post transformation
+    cfg.use_back_trans = cfg.get("use_back_trans", True)
+    cfg.save_mode = cfg.get("save_mode", "single-view")
+    assert cfg.save_mode in ["single-view", "all-in-one", "image_filename"]
+    cfg.use_map0 = cfg.get("use_map0", False)
 
     # == device and dtype ==
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -200,22 +191,13 @@ def main():
             mmengine_conf_set(cfg, "model.frame_emb_param.enable_xformers", False)
 
     # == init distributed env ==
+    cfg.sp_size = cfg.get("sp_size", 1)
     if is_distributed():
-        # colossalai.launch_from_torch({})
-        local_rank = int(os.environ.get("LOCAL_RANK", 0))
-        torch.cuda.set_device(local_rank)
-
-        dist.init_process_group(
-            backend="nccl",
-            timeout=timedelta(hours=1),
-            device_id=torch.device(f"cuda:{local_rank}"),
-        )
-        cfg.sp_size = dist.get_world_size()
+        colossalai.launch_from_torch({})
     else:
         dist.init_process_group(
             backend="nccl", world_size=1, rank=0,
             init_method="tcp://localhost:12355")
-        cfg.sp_size = 1
     coordinator = DistCoordinator()
     if cfg.sp_size > 1:
         DP_AXIS, SP_AXIS = 0, 1
@@ -224,12 +206,10 @@ def main():
         dp_group = pg_mesh.get_group_along_axis(DP_AXIS)
         sp_group = pg_mesh.get_group_along_axis(SP_AXIS)
         set_sequence_parallel_group(sp_group)
-        print(f"Using sp_size={cfg.sp_size}")
     else:
         # TODO: sequence_parallel_group unset!
         dp_group = dist.group.WORLD
     set_data_parallel_group(dp_group)
-    enable_sequence_parallelism = cfg.sp_size > 1
     set_random_seed(seed=cfg.get("seed", 1024))
 
     # == init exp_dir ==
@@ -310,9 +290,19 @@ def main():
     os.environ['TOKENIZERS_PARALLELISM'] = "true"
     text_encoder = build_module(cfg.text_encoder, MODELS, device=device)
     vae = build_module(cfg.vae, MODELS).to(device, dtype).eval()
-    if cfg.vae_tiling:
-        vae.module.enable_tiling(**TILING_PARAM[str(cfg.vae_tiling)])
-        logger.info(f"VAE Tiling is enabled with {TILING_PARAM[str(cfg.vae_tiling)]}")
+
+    # == prepare video size ==
+    if cfg.use_back_trans:
+        # FIXME: we should have permuted (0, 1) here, but we did not do it.
+        back_trans = TF.Compose([
+            TF.Resize(cfg.post.resize, interpolation=TF.InterpolationMode.BICUBIC),
+            TF.Pad(cfg.post.padding),
+        ])
+        cut_length = cfg.post.get("cut_length", None)
+    else:
+        def back_trans(x): return x
+        cut_length = cfg.post.get("cut_length", None)
+    logger.info(f"Using transform:\n{back_trans}\ncut_length={cut_length}")
 
     # == build diffusion model ==
     model = (
@@ -323,7 +313,7 @@ def main():
             in_channels=vae.out_channels,
             caption_channels=text_encoder.output_dim,
             model_max_length=text_encoder.model_max_length,
-            enable_sequence_parallelism=enable_sequence_parallelism,
+            enable_sequence_parallelism=cfg.sp_size > 1,
         )
         .to(device, dtype)
         .eval()
@@ -344,23 +334,23 @@ def main():
         text_encoder.t5.model, model, vae, last_hook = enable_offload(
             text_encoder.t5.model, model, vae, device)
     # == load prompts ==
-    # prompts = cfg.get("prompt", None)
-    start_idx = cfg.get("start_index", 0)
-
-    # == prepare arguments ==
     batch_size = cfg.get("batch_size", 1)
     num_sample = cfg.get("num_sample", 1)
 
-    save_dir = cfg.save_dir
-    os.makedirs(save_dir, exist_ok=True)
-    sample_name = cfg.get("sample_name", None)
-    prompt_as_path = cfg.get("prompt_as_path", False)
+    save_video_dir = os.path.join(cfg.save_dir, "gen_video")
+    save_gt_video_dir = os.path.join(cfg.save_dir, "gt_video")
 
     # == Iter over all samples ==
     start_step = 0
+    total_num = 0
     assert batch_size == 1
     sampler.set_epoch(0)
     dataloader_iter = iter(dataloader)
+
+    generator = torch.Generator("cpu").manual_seed(cfg.seed)
+    bl_generator = torch.Generator("cpu").manual_seed(cfg.seed)
+    nusc = NuScenes(version="v1.0-trainval", dataroot="data/nuscenes", verbose=False) ##TODO: config data_root
+    val_scenes = [s["name"] for s in nusc.scene if s["name"] in splits.val]
     with tqdm(
         enumerate(dataloader_iter, start=start_step),
         desc=f"Generating",
@@ -369,6 +359,7 @@ def main():
         total=num_steps_per_epoch,
     ) as pbar:
         for i, batch in pbar:
+            this_token: str = batch['meta_data']['metas'][0][0].data['token']
             if cfg.ignore_ori_imgs:
                 B, T, NC = 1, *batch["pixel_values_shape"][0].tolist()[:2]
                 latent_size = vae.get_latent_size(
@@ -376,9 +367,8 @@ def main():
             else:
                 B, T, NC = batch["pixel_values"].shape[:3]
                 latent_size = vae.get_latent_size((T, *batch["pixel_values"].shape[-2:]))
-                # == prepare batch prompts ==
-                x = batch.pop("pixel_values").to(device, dtype)
-                x = rearrange(x, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
+
+            # == prepare batch prompts ==
             y = batch.pop("captions")[0]  # B, just take first frame
             maps = batch.pop("bev_map_with_aux").to(device, dtype)  # B, T, C, H, W
             bbox = batch.pop("bboxes_3d_data")
@@ -394,13 +384,6 @@ def main():
             rel_pos = batch.pop("frame_emb").to(device, dtype)
             rel_pos = repeat(rel_pos, "B T ... -> (B NC) T 1 ...", NC=NC)  # BxNC, T, 1, 4, 4
 
-            # variable for inference
-            batch_prompts = y
-            # ms = mask_strategy[i : i + batch_size]
-            ms = [""] * len(y)
-            # refs = reference_path[i : i + batch_size]
-            refs = [""] * len(y)
-
             # == model input format ==
             model_args = {}
             model_args["maps"] = maps
@@ -408,16 +391,9 @@ def main():
             model_args["cams"] = cams
             model_args["rel_pos"] = rel_pos
             model_args["fps"] = batch.pop('fps')
-            model_args['drop_cond_mask'] = torch.ones((B))  # camera
-            model_args['drop_frame_mask'] = torch.ones((B, T))  # box & rel_pos
             model_args["height"] = batch.pop("height")
             model_args["width"] = batch.pop("width")
             model_args["num_frames"] = batch.pop("num_frames")
-            
-            # Clean up batch dict after extracting all needed data
-            del batch
-            gc.collect()
-            torch.cuda.empty_cache()
             model_args = move_to(model_args, device=device, dtype=dtype)
             # no need to move these
             model_args["mv_order_map"] = cfg.get("mv_order_map")
@@ -425,70 +401,33 @@ def main():
 
             # == Iter over number of sampling for one prompt ==
             save_fps = int(model_args['fps'][0])
-            for ns in range(num_sample):
-                gc.collect()
-                torch.cuda.empty_cache()
-                # == prepare save paths ==
-                save_paths = [
-                    get_save_path_name(
-                        save_dir,
-                        sample_name=sample_name,
-                        sample_idx=start_idx + idx,
-                        prompt=y[idx],
-                        prompt_as_path=prompt_as_path,
-                        num_sample=num_sample,
-                        k=ns,
+            _fpss = gather_tensors(model_args['fps'], pg=get_data_parallel_group())
+            _tokens = [[bytes(_t).decode("utf8") for _t in _tk] for _tk in gather_tensors(
+                torch.ByteTensor([bytes(this_token, 'utf8')]).to(device=device))]
+            if cfg.save_mode == "image_filename":
+                gen_length = cut_length if cut_length is not None else T
+                # assume bs=1!
+                _filenames = [
+                    deserialize_state(_meta)
+                    for _meta in gather_tensors(
+                        serialize_state(
+                            [batch['meta_data']['metas'][i][0].data['filename'] for i in range(gen_length)]
+                        ).cuda(),
+                        pg=get_data_parallel_group(),
                     )
-                    for idx in range(len(y))
                 ]
-                if cfg.get("force_daytime", False):
-                    batch_prompts[0] = batch_prompts[0].lower()
-                    batch_prompts[0] = "Daytime. " + batch_prompts[0]
-                    # exclude rain
-                    batch_prompts[0] = batch_prompts[0].replace("rain", "sunny")
-                    batch_prompts[0] = batch_prompts[0].replace("water reflections", "")
-                    batch_prompts[0] = batch_prompts[0].replace("reflections in water", "")
-                    batch_prompts[0] = batch_prompts[0].replace(" with umbrellas", "")
-                    batch_prompts[0] = batch_prompts[0].replace(" with umbrella", "")
-                    batch_prompts[0] = batch_prompts[0].replace(" holds umbrella", "")
-                    # exclude night
-                    batch_prompts[0] = batch_prompts[0].replace("night", "")
-                    batch_prompts[0] = batch_prompts[0].replace(" in dark", "")
-                    batch_prompts[0] = batch_prompts[0].replace(" dark", "")
-                    batch_prompts[0] = batch_prompts[0].replace(" difficult lighting", "")
-                    # city
-                    batch_prompts[0] = batch_prompts[0].replace("boston-seaport", "singapore-onenorth")
-                    batch_prompts[0] = batch_prompts[0].replace("singapore-hollandvillage", "singapore-onenorth")
-                    neg_prompts = ["Rain, Night, water reflections, umbrella"]
-                elif cfg.get("force_rainy", False):
-                    if "rain" not in batch_prompts[0].lower():
-                        batch_prompts[0] = "A driving scene image at boston-seaport. Rain. water reflections."
-                    neg_prompts = ["Daytime. night, onenorth, queenstown"]
-                elif cfg.get("force_night", False):
-                    if "night" not in batch_prompts[0].lower():
-                        batch_prompts[0] = "A driving scene image at singapore-hollandvillage. Night, congestion. difficult lighting. very dark."
-                    neg_prompts = ["Daytime. rain, boston-seaport"]
-                else:
-                    neg_prompts = None
+            for ns in range(num_sample):
+                z = torch.randn(
+                    len(y), vae.out_channels * NC, *latent_size, generator=generator,
+                ).to(device=device, dtype=dtype)
 
-                video_clips = []
-                # == sampling ==
-                torch.manual_seed(1024 + ns)  # NOTE: not sure how to handle loop, just change here.
-                z = torch.randn(len(batch_prompts), vae.out_channels * NC, *latent_size, device=device, dtype=dtype)
-
+                # == Load pedestrian frames ==
                 assert B == 1, "Only support bs=1 for pedestrian repainting"
                 pedestrian_video_dir = cfg.get("pedestrian_video_dir", "data/val_videos_12hz")
-                if isinstance(validation_index, str):
-                    if validation_index == "all":
-                        current_index = i
-                    elif validation_index == "even":
-                        current_index = i * 2
-                    elif validation_index == "odd":
-                        current_index = i * 2 + 1
-                elif isinstance(validation_index, list):
-                    current_index = validation_index[i]
-                else:
-                    raise ValueError("Unknown validation_index type")
+                current_scene_token = nusc.get("sample", this_token)["scene_token"]
+                current_scene_name = nusc.get("scene", current_scene_token)["name"]
+                assert current_scene_name in val_scenes, f"{current_scene_name} not found in validation scenes"
+                current_index = val_scenes.index(current_scene_name)
                 pedestrian_video_path = os.path.join(
                     pedestrian_video_dir, f"{current_index}/rgbs_wo_background.mp4"
                 )
@@ -550,10 +489,12 @@ def main():
                 # Free memory after processing mask frames
                 del pedestrian_mask_frames
                 torch.cuda.empty_cache()
+
                 # == sample box ==
                 if bbox is not None:
                     # null set values to all zeros, this should be safe
-                    bbox = add_box_latent(bbox, B, NC, T, model.sample_box_latent)
+                    bbox = add_box_latent(bbox, B, NC, T,
+                                          partial(model.sample_box_latent, generator=bl_generator))
                     # overwrite!
                     new_bbox = {}
                     for k, v in bbox.items():
@@ -572,27 +513,25 @@ def main():
                         model.camera_embedder.uncond_cam.to(device),
                         model.frame_embedder.uncond_cam.to(device),
                         prepend=(cfg.scheduler.type == "dpm-solver"),
+                        use_map0=cfg.get("use_map0", False),
                     )
 
                 # == inference ==
-                masks = None
-                masks = apply_mask_strategy(z, refs, ms, 0, align=None)
                 samples = scheduler.sample(
                     model,
                     text_encoder,
                     z=z,
                     z_inpaint=z_pedestrian,
                     mask_inpaint=mask_pedestrian,
-                    prompts=batch_prompts,
-                    neg_prompts=neg_prompts,
+                    prompts=y,
                     device=device,
                     additional_args=_model_args,
-                    progress=verbose >= 1,
-                    mask=masks,
+                    progress=verbose >= 1 and coordinator.is_master(),
+                    mask=None,
                 )
                 
                 # Clean up after sampling
-                del z, z_pedestrian, mask_pedestrian, masks
+                del z, z_pedestrian, mask_pedestrian
                 torch.cuda.empty_cache()
                 
                 samples = rearrange(samples, "B (C NC) T ... -> (B NC) C T ...", NC=NC)
@@ -607,77 +546,122 @@ def main():
                 samples = rearrange(samples, "(B NC) C T ... -> B NC C T ...", NC=NC)
                 if cfg.cpu_offload:
                     last_hook.offload()
-                if is_main_process():
-                    vid_samples = []
-                    for sample in samples:
-                        vid_samples.append(
-                            concat_6_views_pt(sample, oneline=False)
-                        )
-                    samples = torch.stack(vid_samples, dim=0)
-                    video_clips.append(samples)
-                    del vid_samples
-                    torch.cuda.empty_cache()
-                del samples
-                torch.cuda.empty_cache()
+                # cut to standard length
+                samples = samples[:, :, :, slice(None, cut_length)]
+
+                # gather sample from all processes
+                coordinator.block_all()
+                _samples = gather_tensors(samples, pg=get_data_parallel_group())
+
+                # == save samples, one-time-generation only ==
+                if coordinator.is_master():
+                    video_clips = []
+                    fpss = []
+                    tokens = []
+                    for sample, fps, token in zip(_samples, _fpss, _tokens):  # list of B, NC, C, T ...
+                        video_clips += [s.cpu() for s in sample]  # list of NC, C, T ...
+                        fpss += [int(_fps) for _fps in fps]
+                        tokens += [_tk for _tk in token]
+                    for idx, videos in enumerate(video_clips):  # NC, C, T ...
+                        if cfg.save_mode == "single-view":
+                            for view, video in zip(VIEW_ORDER, videos):
+                                save_path = os.path.join(
+                                    save_video_dir, f"{tokens[idx]}_gen{ns}",
+                                    f"{tokens[idx]}_{view}")
+                                make_file_dirs(save_path)
+                                save_path = save_sample(
+                                    back_trans(video),
+                                    fps=save_fps if save_fps else fpss[idx],
+                                    save_path=save_path,
+                                    high_quality=True,
+                                    verbose=verbose >= 2,
+                                    with_postfix=False,
+                                )
+                        elif cfg.save_mode == "all-in-one":
+                            video = concat_6_views_pt(videos, oneline=False)
+                            save_path = os.path.join(
+                                save_video_dir, f"{tokens[idx]}_gen{ns}")
+                            make_file_dirs(save_path)
+                            save_path = save_sample(
+                                back_trans(video),
+                                fps=save_fps if save_fps else fpss[idx],
+                                save_path=save_path,
+                                high_quality=True,
+                                verbose=verbose >= 2,
+                            )
+                        elif cfg.save_mode == "image_filename":
+                            # save image with their original name
+                            for v_idx, (view, video) in enumerate(zip(VIEW_ORDER, videos)):
+                                # video: C, T, H, W
+                                assert video.shape[1] == len(_filenames[idx])
+                                for _t in range(video.shape[1]):
+                                    _basename = os.path.basename(_filenames[idx][_t][v_idx])
+                                    _basename = os.path.splitext(_basename)[0]
+                                    save_path = os.path.join(
+                                        save_video_dir, view,
+                                        f"{_basename}_gen{ns}.jpg",
+                                    )
+                                    make_file_dirs(save_path)
+                                    save_path = save_sample(
+                                        back_trans(video[:, _t:_t+1]),  # take single frame
+                                        fps=save_fps if save_fps else fpss[idx],
+                                        save_path=save_path,
+                                        verbose=verbose >= 2,
+                                        with_postfix=False,
+                                    )
                 coordinator.block_all()
 
-                # == save samples ==
-                torch.cuda.empty_cache()
-                if is_main_process():
-                    for idx, batch_prompt in enumerate(batch_prompts):
-                        if verbose >= 1:
-                            logger.info(f"Prompt: {batch_prompt}")
-                            if neg_prompts is not None:
-                                logger.info(f"Neg-prompt: {neg_prompts[idx]}")
-                        save_path = save_paths[idx]
-                        video = [video_clips[0][idx]]
-                        video = torch.cat(video, dim=1)
+            total_num += len(y)
+            if cfg.ignore_ori_imgs or cfg.get("skip_save_original", False):
+                coordinator.block_all()
+                continue
+
+            # == save_gt ==
+            x = batch.pop("pixel_values").to(device, dtype)
+            x = rearrange(x, "B T NC C ... -> B NC C T ...")  # B, NC, C, T, H, W
+            # cut to standard length
+            x = x[:, :, :, slice(None, cut_length)]
+            _samples = gather_tensors(x, pg=get_data_parallel_group())
+            if coordinator.is_master():
+                # gather
+                samples = []
+                fpss = []
+                tokens = []
+                for sample, fps, token in zip(_samples, _fpss, _tokens):  # list of B, NC, C, T ...
+                    samples += [s.cpu() for s in sample]  # list of NC, C, T ...
+                    fpss += [int(_fps) for _fps in fps]
+                    tokens += [_tk for _tk in token]
+                # save
+                for idx, sample in enumerate(samples):  # NC, C, T ...
+                    if cfg.save_mode == "single-view":
+                        for view, video in zip(VIEW_ORDER, sample):
+                            save_path = os.path.join(
+                                save_gt_video_dir, f"{tokens[idx]}",
+                                f"{tokens[idx]}_{view}")
+                            make_file_dirs(save_path)
+                            save_path = save_sample(
+                                back_trans(video),
+                                fps=save_fps if save_fps else fpss[idx],
+                                save_path=save_path,
+                                high_quality=True,
+                                verbose=verbose >= 2,
+                                with_postfix=False,
+                            )
+                    elif cfg.save_mode == "all-in-one":
+                        vid_sample = concat_6_views_pt(sample, oneline=False)
+                        save_path = os.path.join(
+                            save_gt_video_dir, f"{tokens[idx]}")
+                        make_file_dirs(save_path)
                         save_path = save_sample(
-                            video,
-                            fps=save_fps,
+                            back_trans(vid_sample),
+                            fps=save_fps if save_fps else fpss[idx],
                             save_path=save_path,
                             high_quality=True,
                             verbose=verbose >= 2,
-                            save_per_n_frame=cfg.get("save_per_n_frame", -1),
-                            force_image=cfg.get("force_image", False),
                         )
-                        del video
-                    torch.cuda.empty_cache()
-                del video_clips
-                torch.cuda.empty_cache()
-                coordinator.block_all()
-
-            # save_gt
-            if is_main_process() and not cfg.ignore_ori_imgs:
-                torch.cuda.empty_cache()
-                samples = rearrange(x, "(B NC) C T H W -> B NC C T H W", NC=NC)
-                for idx, sample in enumerate(samples):
-                    vid_sample = concat_6_views_pt(sample, oneline=False)
-                    save_path = save_sample(
-                        vid_sample,
-                        fps=save_fps,
-                        save_path=os.path.join(save_dir, f"gt_{start_idx + idx:04d}"),
-                        high_quality=True,
-                        verbose=verbose >= 2,
-                        save_per_n_frame=cfg.get("save_per_n_frame", -1),
-                        force_image=cfg.get("force_image", False),
-                    )
-                    del vid_sample
-                del samples
-                torch.cuda.empty_cache()
-            
-            # Clean up loop variables
-            num_prompts = len(batch_prompts)
-            del y, maps, bbox, cams, rel_pos, model_args, batch_prompts, ms, refs, save_fps
-            if not cfg.ignore_ori_imgs:
-                del x
             coordinator.block_all()
-            gc.collect()
-            torch.cuda.empty_cache()
-            
-            start_idx += num_prompts
     logger.info("Inference finished.")
-    logger.info("Saved %s samples to %s", start_idx - cfg.get("start_index", 0), save_dir)
+    logger.info("Saved %s samples to %s", total_num, cfg.save_dir)
     coordinator.destroy()
 
 
