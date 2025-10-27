@@ -643,6 +643,140 @@ class RFLOW_BRUSHNET_SLICE(RFLOW_BRUSHNET):
         return z
 
 
+@SCHEDULERS.register_module("rflow-sdebrushnet-slice")
+class RFLOW_SDEBRUSHNET_SLICE(RFLOW_SDEBRUSHNET):
+
+    def sample(
+        self,
+        model,
+        text_encoder,
+        z,
+        z_inpaint,
+        mask_inpaint,
+        prompts,
+        device,
+        neg_prompts=None,
+        additional_args=None,
+        mask=None,
+        guidance_scale=None,
+        inpaint_noise_scale=None,
+        progress=True,
+    ):
+        # if no specific guidance scale is provided, use the default scale when initializing the scheduler
+        if guidance_scale is None:
+            guidance_scale = self.cfg_scale
+        
+        # if no specific inpaint noise scale is provided, use the default scale when initializing the scheduler
+        if inpaint_noise_scale is None:
+            inpaint_noise_scale = self.inpaint_noise_scale
+
+        n = len(prompts)
+        # text encoding
+        original_text_encoder_device = text_encoder.t5.model.device
+        model_args = text_encoder.encode(prompts)
+        if additional_args is not None:
+            model_args.update(additional_args)
+        if neg_prompts is not None:
+            y_null = text_encoder.encode(neg_prompts)["y"]
+        else:
+            y_null = text_encoder.null(n).to(device)
+        text_encoder.t5.model.to(original_text_encoder_device)
+        torch.cuda.empty_cache()
+        
+        # prepare timesteps
+        timesteps = [
+            (1.0 - i / self.num_sampling_steps) * self.num_timesteps
+            for i in range(self.num_sampling_steps)
+        ]
+        if self.use_discrete_timesteps:
+            timesteps = [int(round(t)) for t in timesteps]
+        timesteps = [torch.tensor([t] * z.shape[0], device=device) for t in timesteps]
+        if self.use_timestep_transform:
+            timesteps = [
+                timestep_transform(
+                    t,
+                    additional_args,
+                    num_timesteps=self.num_timesteps,
+                    cog_style=self.scheduler.cog_style_trans,
+                )
+                for t in timesteps
+            ]
+
+        if mask is not None:
+            noise_added = torch.zeros_like(mask, dtype=torch.bool)
+            noise_added = noise_added | (mask == 1)
+
+        progress_wrap = partial(tqdm, leave=False) if progress else (lambda x: x)
+        original_model_device = model.device
+        for i, t in progress_wrap(enumerate(timesteps)):
+            # mask for adding noise
+            if mask is not None:
+                mask_t = mask * self.num_timesteps
+                x0 = z.clone()
+                x_noise = self.scheduler.add_noise(x0, torch.randn_like(x0), t)
+
+                mask_t_upper = mask_t >= t.unsqueeze(1)
+                mask_add_noise = mask_t_upper & ~noise_added
+
+                z = torch.where(mask_add_noise[:, None, :, None, None], x_noise, x0)
+                noise_added = mask_t_upper
+
+            # Add controlled noise to z_inpaint
+            # Create independent timestep for inpaint based on noise scale
+            # t_inpaint represents the noise level to add to z_inpaint (independent of diffusion timestep t)
+            t_inpaint = torch.tensor([inpaint_noise_scale * self.num_timesteps] * z.shape[0], device=device)
+            noise_inpaint_encoded = torch.randn_like(z)
+
+            # 1. all cond
+            _model_args = {k: v for k, v in model_args.items()}
+            if mask is not None:
+                _model_args["x_mask"] = mask_t_upper
+
+            pred = model(z, z_inpaint, mask_inpaint, t, t_inpaint, self.num_timesteps, noise_inpaint_encoded=noise_inpaint_encoded, **_model_args)
+            if pred.shape[1] == z.shape[1] * 2:
+                pred = pred.chunk(2, dim=1)[0]
+            else:
+                assert pred.shape[1] == z.shape[1]
+            all_pred = pred
+
+            # 2. all uncond
+            _model_args = replace_with_null_condition(
+                model_args,
+                model.camera_embedder.uncond_cam.to(device),
+                model.frame_embedder.uncond_cam.to(device),
+                y_null,
+                ["y", "bbox", "cams", "rel_pos", "maps"],
+                append=False,
+            )
+            if mask is not None:
+                _model_args["x_mask"] = mask_t_upper
+            pred = model(z, z_inpaint, mask_inpaint, t, t_inpaint, self.num_timesteps, noise_inpaint_encoded=noise_inpaint_encoded, **_model_args)
+            if pred.shape[1] == z.shape[1] * 2:
+                pred = pred.chunk(2, dim=1)[0]
+            else:
+                assert pred.shape[1] == z.shape[1]
+            null_pred = pred
+
+            # classifier-free guidance
+            v_pred = null_pred + guidance_scale * (all_pred - null_pred)
+
+            # update z
+            dt = (
+                timesteps[i] - timesteps[i + 1]
+                if i < len(timesteps) - 1
+                else timesteps[i]
+            )
+            dt = dt / self.num_timesteps
+            z = z + v_pred * dt[:, None, None, None, None]
+
+            if mask is not None:
+                z = torch.where(mask_t_upper[:, None, :, None, None], z, x0)
+        
+        model.to(original_model_device)
+        torch.cuda.empty_cache()
+        return z
+
+
 @SCHEDULERS.register_module("rflow-slice-repaint")
 class RFLOW_SLICE_REPAINT(RFLOW):
 

@@ -2055,6 +2055,11 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
         x_inpaint_encoded = self.shallow_encoder(x_inpaint)
         if noise_inpaint_encoded is None:
             noise_inpaint_encoded = torch.randn_like(x_inpaint_encoded)
+        else:
+            noise_inpaint_encoded = noise_inpaint_encoded.to(dtype)
+            noise_inpaint_encoded = rearrange(
+                noise_inpaint_encoded, "B (C NC) T ... -> (B NC) C T ...", NC=NC
+            )
         assert noise_inpaint_encoded.shape == x_inpaint_encoded.shape, \
             f"noise_inpaint_encoded shape {noise_inpaint_encoded.shape} does not match x_inpaint_encoded shape {x_inpaint_encoded.shape}!"
         # Add noise to x_inpaint_encoded according to timestep_inpaint

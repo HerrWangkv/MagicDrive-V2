@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=inference_brushnet
+#SBATCH --job-name=inference_sde_brushnet
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=01:00:00
-#SBATCH --partition=accelerated-h100
-#SBATCH --output=logs/inference_brushnet_%j.out
-#SBATCH --error=logs/inference_brushnet_%j.err
+#SBATCH --partition=accelerated-h200
+#SBATCH --output=logs/inference_sde_brushnet_%j.out
+#SBATCH --error=logs/inference_sde_brushnet_%j.err
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
@@ -245,15 +245,10 @@ apptainer exec --nv --writable-tmpfs \
             echo \"Looking for samples directory:\"
             find /MagicDrive-V2/data/nuscenes/ -name \"samples\" -type d 2>/dev/null || echo \"No samples directory found\"
         fi
-        
-        # Run the training command with relative paths from /MagicDrive-V2
-        echo 'About to run training from:' \$(pwd)
-        echo 'Training script location:' \$(ls -la scripts/train_brushnet.py)
 
-        python3 -m pip install --no-cache-dir numpy==1.24.2
         torchrun --nproc-per-node=4 --nnodes=$SLURM_JOB_NUM_NODES --node_rank=$SLURM_NODEID \
             --master_addr=\$MASTER_ADDR --master_port=\$MASTER_PORT \
-            scripts/inference_magicdrive_brushnet.py configs/magicdrive/inference/fullx848x1600_stdit3_CogVAE_boxTDS_wCT_xCE_wSST_brushnet.py \
+            scripts/inference_magicdrive_sde_brushnet.py configs/magicdrive/inference/fullx848x1600_stdit3_CogVAE_boxTDS_wCT_xCE_wSST_sde_brushnet.py \
             --cfg-options cpu_offload=true
     "
 

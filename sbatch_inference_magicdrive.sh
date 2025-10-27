@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=magicdrive_brushnet
+#SBATCH --job-name=inference_magicdrive
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --time=01:00:00
 #SBATCH --partition=accelerated-h100
-#SBATCH --output=logs/train_brushnet_%j.out
-#SBATCH --error=logs/train_brushnet_%j.err
+#SBATCH --output=logs/inference_magicdrive_%j.out
+#SBATCH --error=logs/inference_magicdrive_%j.err
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
