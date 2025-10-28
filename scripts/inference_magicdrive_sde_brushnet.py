@@ -579,7 +579,7 @@ def main():
                 masks = apply_mask_strategy(z, refs, ms, 0, align=None)
                 
                 # Get inpaint_noise_scale from config if available
-                inpaint_noise_scale = cfg.scheduler.get("inpaint_noise_scale", None)
+                inpaint_noise_scale = cfg.get("inpaint_noise_scale", None)
                 
                 samples = scheduler.sample(
                     model,

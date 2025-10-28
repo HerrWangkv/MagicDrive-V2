@@ -142,8 +142,10 @@ model = dict(
     ),
     control_skip_cross_view=True,
     control_skip_temporal=False,  # CHANGED
+    brushnet_skip_cross_attn=True,
+    use_lora_base_blocks=True,
     # load pretrained
-    from_pretrained="outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251025-1712/epoch0-global_step2000/ema.pt",
+    from_pretrained="outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251027-0834/epoch0-global_step6000/ema.pt",
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
 )
 # partial_load="outputs/temp/CogVAE/MagicDriveSTDiT3-XL-2_1x224x400_stdit3_CogVAE_noTemp_xCE_wSST_bs4_lr8e-5_20240822-1911/epoch363-global_step80000"
@@ -187,7 +189,7 @@ ckpt_every = 500 * 5
 
 # Pedestrian repainting settings
 pedestrian_video_dir = "data/val_videos_12hz_848x1600"
-inpaint_noise_scale = 0.3
+inpaint_noise_scale = 0.5
 
 # optimization settings
 load = None
