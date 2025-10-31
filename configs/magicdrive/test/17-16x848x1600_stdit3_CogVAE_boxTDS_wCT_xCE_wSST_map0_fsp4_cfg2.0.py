@@ -145,7 +145,7 @@ model = dict(
     control_skip_cross_view=True,
     control_skip_temporal=False,  # CHANGED
     # load pretrained
-    from_pretrained="???",
+    from_pretrained="ckpts/MagicDriveDiT-stage3-40k-ft/ema.pt",
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
 )
 # partial_load="outputs/temp/CogVAE/MagicDriveSTDiT3-XL-2_1x224x400_stdit3_CogVAE_noTemp_xCE_wSST_bs4_lr8e-5_20240822-1911/epoch363-global_step80000"
