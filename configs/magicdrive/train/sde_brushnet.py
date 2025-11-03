@@ -361,7 +361,7 @@ ckpt_every = 1000
 report_every = ckpt_every
 
 # optimization settings
-load = "outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251025-1712/epoch0-global_step4000"
+load = "outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251027-0834/epoch0-global_step8000"
 grad_clip = 1.0
 lr = 2e-5
 ema_decay = 0.99
