@@ -191,7 +191,7 @@ ckpt_every = 500 * 5
 
 # Pedestrian repainting settings
 pedestrian_video_dir = "data/val_videos_12hz_848x1600"
-inpaint_noise_scale = 0
+inpaint_noise_scale = 0.9
 
 # optimization settings
 load = None

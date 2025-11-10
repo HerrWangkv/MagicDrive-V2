@@ -4,8 +4,8 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
-#SBATCH --time=00:30:00
-#SBATCH --partition=dev_accelerated-h100
+#SBATCH --time=48:00:00
+#SBATCH --partition=accelerated-h100
 #SBATCH --output=logs/eval_sde_brushnet_%j.out
 #SBATCH --error=logs/eval_sde_brushnet_%j.err
 
