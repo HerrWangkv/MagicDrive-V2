@@ -298,7 +298,7 @@ model = dict(
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
 )
 
-partial_load = "./outputs/MagicDriveSTDiT3-XL-2-BrushNet_brushnet_20251024-0927/epoch0-global_step10000"
+partial_load = "outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251102-0711/epoch0-global_step12000"
 
 
 vae = dict(
@@ -361,7 +361,7 @@ ckpt_every = 1000
 report_every = ckpt_every
 
 # optimization settings
-load = "outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251027-0834/epoch0-global_step8000"
+load = None
 grad_clip = 1.0
 lr = 2e-5
 ema_decay = 0.99
