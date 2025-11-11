@@ -215,3 +215,5 @@ fusion_result.json
 !tools/fvd/lib
 
 *.sif
+
+weights
