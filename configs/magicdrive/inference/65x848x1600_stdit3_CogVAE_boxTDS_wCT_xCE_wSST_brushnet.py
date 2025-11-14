@@ -1,14 +1,14 @@
 fps = 12
 frame_interval = 1
 save_fps = 12
-validation_index = [34]
+validation_index = [7]
 num_sample = 1
 
 batch_size = 1
 dtype = "bf16"
 
 scheduler = dict(
-    type="rflow",
+    type="rflow-brushnet",
     use_timestep_transform=True,
     cog_style_trans=True,  # NOTE: trigger error with 9-frame, should change in all cases when frame > 1.
     num_sampling_steps=30,
@@ -75,7 +75,7 @@ micro_frame_size = None
 vae_out_channels = 16
 
 model = dict(
-    type="MagicDriveSTDiT3-XL/2",
+    type="MagicDriveSTDiT3-XL/2-BrushNet",
     qk_norm=True,
     pred_sigma=False,
     enable_flash_attn=True and global_flash_attn,
@@ -144,8 +144,10 @@ model = dict(
     ),
     control_skip_cross_view=True,
     control_skip_temporal=False,  # CHANGED
+    brushnet_skip_cross_attn=True,
+    use_lora_base_blocks=True,
     # load pretrained
-    from_pretrained="ckpts/MagicDriveDiT-stage3-40k-ft/ema.pt",
+    from_pretrained="outputs/MagicDriveSTDiT3-XL-2-BrushNet_brushnet_20251024-0927/epoch0-global_step10000/ema.pt",
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
 )
 # partial_load="outputs/temp/CogVAE/MagicDriveSTDiT3-XL-2_1x224x400_stdit3_CogVAE_noTemp_xCE_wSST_bs4_lr8e-5_20240822-1911/epoch363-global_step80000"
@@ -181,11 +183,14 @@ mask_ratios = {
 
 # Log settings
 seed = 42
-outputs = "outputs/test_65/CogVAE-848"
+outputs = "outputs/test_brushnet_65/CogVAE-848"
 wandb = False
 epochs = 150
 log_every = 1
 ckpt_every = 500 * 5
+
+# Pedestrian repainting settings
+pedestrian_video_dir = "data/val_videos_12hz_848x1600"
 
 # optimization settings
 load = None

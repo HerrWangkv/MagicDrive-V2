@@ -83,7 +83,7 @@ model = dict(
     # magicdrive
     with_temp_block=True,  # CHANGED
     use_x_control_embedder=True,
-    enable_xformers = False and global_xformers,
+    enable_xformers=False and global_xformers,
     sequence_parallelism_temporal=False,
     use_st_cross_attn=False,
     uncond_cam_in_dim=(3, 7),
@@ -103,7 +103,7 @@ model = dict(
         proj_dims=[1152, 512, 512, 1152],
         mode=bbox_mode,
         minmax_normalize=False,
-        use_text_encoder_init=True, 
+        use_text_encoder_init=True,
         after_proj=True,
         sample_id=True,  # CHANGED
         # new
@@ -145,7 +145,7 @@ model = dict(
     brushnet_skip_cross_attn=True,
     use_lora_base_blocks=True,
     # load pretrained
-    from_pretrained="outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251027-0834/epoch0-global_step6000/ema.pt",
+    from_pretrained="outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251113-2359/epoch0-global_step5000/ema.pt",
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
 )
 # partial_load="outputs/temp/CogVAE/MagicDriveSTDiT3-XL-2_1x224x400_stdit3_CogVAE_noTemp_xCE_wSST_bs4_lr8e-5_20240822-1911/epoch363-global_step80000"
@@ -189,7 +189,7 @@ ckpt_every = 500 * 5
 
 # Pedestrian repainting settings
 pedestrian_video_dir = "data/val_videos_12hz_848x1600"
-inpaint_noise_scale = 0.5
+inpaint_noise_scale = 0.9
 
 # optimization settings
 load = None
