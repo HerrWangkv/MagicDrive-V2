@@ -15,6 +15,7 @@ from rotary_embedding_torch import RotaryEmbedding
 from timm.models.layers import DropPath
 from timm.models.vision_transformer import Mlp
 from transformers import PretrainedConfig, PreTrainedModel
+from structured_noise import generate_structured_noise_batch_vectorized
 
 from magicdrivedit.acceleration.checkpoint import auto_grad_checkpoint
 from magicdrivedit.acceleration.communications import gather_forward_split_backward, split_forward_gather_backward
@@ -2054,7 +2055,39 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
         # This makes x_inpaint_encoded have the same spatial dimensions as x
         x_inpaint_encoded = self.shallow_encoder(x_inpaint)
         if noise_inpaint_encoded is None:
-            noise_inpaint_encoded = torch.randn_like(x_inpaint_encoded)
+            # Use phase-preserving diffusion for noise generation
+            # We use the encoded x_inpaint as the structure guidance            
+            # x_inpaint_encoded is (B*NC, C, T, H, W)
+            # We need to process each frame independently or treat T as batch dim
+            B_NC, C, T, H, W = x_inpaint_encoded.shape
+            
+            # Reshape to (B*NC*T, C, H, W) for 2D processing
+            x_flat = rearrange(x_inpaint_encoded, "b c t h w -> (b t) c h w")
+            
+            # Generate structured noise
+            input_noise = torch.randn_like(x_flat).cpu().float()
+
+            r0 = 4.0
+            if self.training:
+                # r = r0 + r', r' ~ Exp(lambda), lambda = 0.1
+                r_prime = -torch.log(torch.rand(1)).item() / 0.1
+                cutoff_radius = r0 + r_prime
+            else:
+                cutoff_radius = r0
+
+            structured_noise_flat = generate_structured_noise_batch_vectorized(
+                x_flat.cpu().float(),
+                cutoff_radius=cutoff_radius,
+                transition_width=2.0,
+                input_noise=input_noise,
+            )
+            structured_noise_flat = structured_noise_flat.to(
+                device=x_flat.device, dtype=x_flat.dtype
+            )
+            
+            # Reshape back
+            noise_inpaint_encoded = rearrange(structured_noise_flat, "(b t) c h w -> b c t h w", b=B_NC, t=T)
+            
         else:
             noise_inpaint_encoded = noise_inpaint_encoded.to(dtype)
             noise_inpaint_encoded = rearrange(

@@ -79,7 +79,7 @@ RUN python3 -m pip install --no-cache-dir \
     pyquaternion==0.9.9 python-dateutil==2.8.2 pyyaml==6.0.1 ray==2.30.0 \
     regex==2024.5.15 requests==2.28.2 rich==13.9.4 rotary-embedding-torch==0.5.3 \
     rpds-py==0.18.1 rpyc==6.0.0 safetensors==0.4.3 scikit-learn==1.1.3 \
-    scipy==1.9.3 sentencepiece==0.2.0 shapely==1.8.5.post1 six==1.16.0 \
+    scikit-image scipy==1.9.3 sentencepiece==0.2.0 shapely==1.8.5.post1 six==1.16.0 \
     sniffio==1.3.1 soupsieve==2.5 starlette==0.37.2 sympy==1.12 \
     tensorboard==2.11.2 tensorboard-data-server==0.6.1 termcolor==2.4.0 \
     terminaltables==3.1.10 threadpoolctl==3.2.0 timm==0.9.16 tokenizers==0.15.2 \
@@ -94,6 +94,7 @@ RUN python3 -m pip install xformers==0.0.28.post1 --no-deps --index-url https://
 RUN APEX_CPP_EXT=1 APEX_CUDA_EXT=1 python3 -m pip install --no-cache-dir --no-build-isolation -v git+https://github.com/NVIDIA/apex.git
 RUN python3 -m pip install --no-cache-dir --no-build-isolation -v git+https://github.com/flymin/ColossalAI.git@pt2.4
 RUN python3 -m pip install peft==0.10.0
+RUN python3 -m pip install git+https://github.com/zengxianyu/structured-noise.git
 
 # -------------------------------------------------------------------------
 # Copy project source code and install project-specific requirements
