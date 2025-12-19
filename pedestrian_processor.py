@@ -679,7 +679,7 @@ class PoseProcessor:
         
         matrix = np.stack((b1, b2, b3), axis=-1)
         return matrix.reshape(*batch_dim, 3, 3)
-
+    
     def process_sequence(self, sparse_data, total_frames, full_cam2world=None):
         indices = np.array(sparse_data['frame_indices'])
         pose = np.array(sparse_data['pose']) 
@@ -692,7 +692,6 @@ class PoseProcessor:
             return None
 
         # 1. Store the FULL span of the person's existence
-        # (Even if we mask frames later, we want to interpolate between these)
         orig_min_idx = indices.min()
         orig_max_idx = indices.max()
             
@@ -737,36 +736,26 @@ class PoseProcessor:
             cam = np.array(new_cam)
             tform = np.array(new_tform)
 
-        # --- Outlier Masking (Not Deletion) ---
-        # Initialize mask as all valid
+        # --- Outlier Masking ---
         valid_mask = np.ones(len(indices), dtype=bool)
         
         if len(indices) > 5:
             # A. Shape Consistency
             median_betas = np.median(betas, axis=0)
             dist_betas = np.linalg.norm(betas - median_betas, axis=1)
-            valid_mask = valid_mask & (dist_betas < 5.0) # Relaxed threshold
+            valid_mask = valid_mask & (dist_betas < 5.0)
 
             # B. Pose Consistency
-            # Convert to 6D
             p_6d = self.matrix_to_rotation_6d(pose_mat)
             p_flat = p_6d.reshape(len(indices), -1)
-            
-            # Simple global median check for gross pose errors
-            # (Detailed temporal smoothing check is risky on sparse data with gaps)
             median_pose = np.median(p_flat, axis=0)
             dist_pose = np.linalg.norm(p_flat - median_pose, axis=1)
-            
-            # Reject only extreme outliers
             valid_mask = valid_mask & (dist_pose < 15.0)
 
-        # C. Position Consistency (Using GT Center logic passed in 'cam')
+        # C. Position Consistency
         if len(indices) > 2:
-            # Calculate median position of the track
             median_cam = np.median(cam, axis=0)
             dist_cam = np.linalg.norm(cam - median_cam, axis=1)
-            
-            # If a point is > 50m away from the median position of the track, it's definitely noise
             valid_mask = valid_mask & (dist_cam < 50.0)
 
         # Apply Mask
@@ -779,7 +768,7 @@ class PoseProcessor:
         if len(indices) < 2:
             return None
 
-        # --- Convert Root to World (if enabled) ---
+        # --- Convert Root to World ---
         if full_cam2world is not None:
             sparse_c2w = full_cam2world[indices]
             R_c2w = sparse_c2w[:, :3, :3]
@@ -787,13 +776,13 @@ class PoseProcessor:
             root_rot_world = np.matmul(R_c2w, root_rot_cam)
             pose_mat[:, 0] = root_rot_world
             
-        # --- Interpolation ---
+        # --- Interpolation Setup ---
         full_pose = np.zeros((total_frames, 24, 3, 3))
         full_betas = np.zeros((total_frames, betas.shape[1]))
         full_cam = np.zeros((total_frames, cam.shape[1]))
         full_tform = np.zeros((total_frames, 2, 3))
         
-        # Handle Single Frame Case after filtering
+        # Handle Single Frame Case
         if len(indices) == 1:
             full_pose[:] = pose_mat[0]
             full_betas[:] = betas[0]
@@ -819,7 +808,6 @@ class PoseProcessor:
         all_indices = np.arange(total_frames)
         
         # Linear Interp for Vectors
-        # This draws lines across the gaps created by masking
         for i in range(betas.shape[1]):
             full_betas[:, i] = np.interp(all_indices, indices, betas[:, i])
         for i in range(cam.shape[1]):
@@ -832,7 +820,6 @@ class PoseProcessor:
         full_tform = full_tform_flat.reshape(total_frames, 2, 3)
             
         # SLERP for Rotations
-        # We fill the range from orig_min to orig_max
         min_idx, max_idx = orig_min_idx, orig_max_idx
         valid_range_mask = (all_indices >= min_idx) & (all_indices <= max_idx)
         valid_range_indices = all_indices[valid_range_mask]
@@ -840,12 +827,6 @@ class PoseProcessor:
         for j in range(24):
             rots_j = R.from_matrix(pose_mat[:, j])
             slerp = Slerp(indices, rots_j)
-            
-            # SLERP only works within the range of known indices [indices[0]...indices[-1]]
-            # But we might have masked the true endpoints.
-            # We must be careful: scipy Slerp raises error if extrapolating.
-            # So we only SLERP between the SURVIVING indices.
-            # The gaps outside surviving indices but inside orig indices are handled by NN below.
             
             slerp_min, slerp_max = indices[0], indices[-1]
             slerp_mask = (valid_range_indices >= slerp_min) & (valid_range_indices <= slerp_max)
@@ -855,11 +836,8 @@ class PoseProcessor:
                 interp_rots = slerp(slerp_indices)
                 full_pose[slerp_indices, j] = interp_rots.as_matrix()
             
-            # Extrapolate (Nearest Neighbor)
-            # Left side (between orig_min and slerp_min)
             if min_idx < slerp_min:
                 full_pose[min_idx:slerp_min, j] = pose_mat[0, j]
-            # Right side (between slerp_max and orig_max)
             if max_idx > slerp_max:
                 full_pose[slerp_max+1:max_idx+1, j] = pose_mat[-1, j]
             
@@ -867,34 +845,53 @@ class PoseProcessor:
         pose_6d = self.matrix_to_rotation_6d(full_pose)
         pose_6d_flat = pose_6d.reshape(total_frames, -1)
         
-        window_length = 31
-        if total_frames < window_length:
-            window_length = total_frames if total_frames % 2 == 1 else total_frames - 1
-            if window_length < 3: window_length = 3
+        target_traj_window = 21 
+        target_pose_window = 7  
+        
+        def get_valid_window(target, total):
+            w = target if total >= target else total
+            if w % 2 == 0: w -= 1
+            if w < 3: w = 3 
+            return w
             
-        if total_frames >= window_length:
+        traj_w = get_valid_window(target_traj_window, total_frames)
+        pose_w = get_valid_window(target_pose_window, total_frames)
+        
+        if total_frames >= 3:
+            # --- FIX: Generic N-Dim Median Filter ---
             def simple_medfilt(x, k=5):
                 pad = k // 2
-                if x.ndim == 1:
-                    x_pad = np.pad(x, (pad, pad), mode='edge')
-                    y = medfilt(x_pad, kernel_size=k)
-                    return y[pad:-pad]
-                x_pad = np.pad(x, ((pad, pad), (0, 0)), mode='edge')
-                y = medfilt(x_pad, kernel_size=(k, 1))
+                # Construct padding: Pad axis 0 (Time) by (pad, pad), others by (0,0)
+                pad_width = [(pad, pad)] + [(0, 0)] * (x.ndim - 1)
+                x_pad = np.pad(x, pad_width, mode='edge')
+                
+                # Construct kernel: Filter axis 0 by k, others by 1
+                kernel_size = [k] + [1] * (x.ndim - 1)
+                
+                y = medfilt(x_pad, kernel_size=kernel_size)
                 return y[pad:-pad]
 
-            cam_med = simple_medfilt(full_cam, k=5)
-            pose_6d_med = simple_medfilt(pose_6d_flat, k=5)
-            tform_flat = full_tform.reshape(total_frames, 6)
-            tform_med = simple_medfilt(tform_flat, k=5)
-            full_tform_med = tform_med.reshape(total_frames, 2, 3)
+            cam_med = simple_medfilt(full_cam, k=3)
             
-            pose_6d_smooth = savgol_filter(pose_6d_med, window_length, 2, axis=0)
-            betas_smooth = savgol_filter(full_betas, window_length, 2, axis=0)
-            cam_smooth = savgol_filter(cam_med, window_length, 2, axis=0)
-            tform_smooth = savgol_filter(full_tform_med.reshape(total_frames, 6), window_length, 2, axis=0).reshape(total_frames, 2, 3)
+            # Now safe to pass 3D array (T, 24, 6)
+            pose_6d_reshaped = pose_6d_flat.reshape(total_frames, 24, 6)
+            pose_6d_med = simple_medfilt(pose_6d_reshaped, k=3)
+            
+            tform_flat = full_tform.reshape(total_frames, 6)
+            
+            # Savitzky-Golay (Motion Smoothing)
+            betas_smooth = savgol_filter(full_betas, traj_w, 2, axis=0) 
+            cam_smooth = savgol_filter(cam_med, traj_w, 2, axis=0) 
+            tform_smooth = savgol_filter(tform_flat, traj_w, 2, axis=0).reshape(total_frames, 2, 3)
+
+            root_6d = pose_6d_med[:, 0, :] # (T, 6)
+            root_smooth = savgol_filter(root_6d, traj_w, 2, axis=0)
+            
+            body_6d = pose_6d_med[:, 1:, :] # (T, 23, 6)
+            body_smooth = savgol_filter(body_6d, pose_w, 2, axis=0)
+            pose_6d_smooth = np.concatenate([root_smooth[:, None, :], body_smooth], axis=1)
         else:
-            pose_6d_smooth = pose_6d_flat
+            pose_6d_smooth = pose_6d_flat.reshape(total_frames, 24, 6)
             betas_smooth = full_betas
             cam_smooth = full_cam
             tform_smooth = full_tform
@@ -904,7 +901,6 @@ class PoseProcessor:
         if full_cam2world is not None:
             R_c2w_full = full_cam2world[:, :3, :3]
             R_w2c_full = np.transpose(R_c2w_full, (0, 2, 1))
-            
             root_rot_world = pose_smooth_mat[:, 0]
             root_rot_cam = np.matmul(R_w2c_full, root_rot_world)
             pose_smooth_mat[:, 0] = root_rot_cam
@@ -914,6 +910,5 @@ class PoseProcessor:
             'betas': betas_smooth,
             'cam': cam_smooth,
             'tform': tform_smooth,
-            # CRITICAL: Return the ORIGINAL range, ignoring that we might have masked the endpoints
             'valid_range': (orig_min_idx, orig_max_idx)
         }
