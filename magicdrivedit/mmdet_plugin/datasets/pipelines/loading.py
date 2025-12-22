@@ -120,19 +120,24 @@ class LoadMultiViewHumanMaskFromFiles:
         filename = results["image_paths"]
         # img is of shape (h, w, c, num_views)
         # modified for waymo
-        images = []
-        h, w = 0, 0
+        pedestrian_only_imgs, pedestrian_only_masks = [], []
         for name in filename:
-            images.append(
-                Image.open(
-                    name.replace("nuscenes", "nuscenes_masks/human").replace(
-                        ".jpg", ".png"
-                    )
-                )
-            )
+            # Extract the filename and build the new path for the mask
+            pedestrian_only_img_name = name.split("nuscenes")[0] + "nuscenes_pedestrian/" + name.split("/")[-1]
+            pedestrian_only_img_name = pedestrian_only_img_name.replace(".jpg", ".png")
+            pedestrian_only_mask_name = pedestrian_only_img_name.replace(".png", "_mask.png")
+            if os.path.exists(pedestrian_only_img_name):
+                pedestrian_only_imgs.append(Image.open(pedestrian_only_img_name))
+                pedestrian_only_masks.append(Image.open(pedestrian_only_mask_name))
+            else:
+                # Fallback: Create black images (RGB) and masks (Grayscale)
+                # PIL uses (width, height) format
+                pedestrian_only_imgs.append(Image.new("RGB", (1600, 900), (0, 0, 0)))
+                pedestrian_only_masks.append(Image.new("L", (1600, 900), 0))
 
         # TODO: consider image padding in waymo
-        results["human_mask"] = images
+        results["human_img"] = pedestrian_only_imgs
+        results["human_mask"] = pedestrian_only_masks
         # [1600, 900]
 
         return results

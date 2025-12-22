@@ -501,9 +501,13 @@ def main():
                 with timers["move_data"] as move_data_t:
                     x = batch.pop("pixel_values").to(device, dtype)
                     x = rearrange(x, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
+                    human_img = batch.pop("human_imgs").to(device, dtype)
+                    human_img = rearrange(
+                        human_img, "B T NC C ... -> (B NC) C T ..."
+                    )  # BxNC, C, T, H, W
                     human_mask = batch.pop("human_masks").to(device, dtype)
                     human_mask = rearrange(human_mask, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
-                    x_human = torch.where(human_mask > 0.5, x, torch.ones_like(x)) # white background ##TODO:save and check
+                    x_human = torch.where(human_mask > 0.5, human_img, torch.ones_like(x)) # white background ##TODO:save and check
                     y = batch.pop("captions")[0]  # B, just take first frame
                     maps = batch.pop("bev_map_with_aux").to(device, dtype)  # B, T, C, H, W
                     bbox = batch.pop("bboxes_3d_data")

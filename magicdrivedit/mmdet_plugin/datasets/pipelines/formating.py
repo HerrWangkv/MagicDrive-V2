@@ -101,6 +101,8 @@ class DefaultFormatBundle3D:
             results["img"] = DC(torch.stack(results["img"]), stack=True)
         if "human_mask" in results:
             results["human_mask"] = DC(torch.stack(results["human_mask"]), stack=True)
+            assert "human_img" in results
+            results["human_img"] = DC(torch.stack(results["human_img"]), stack=True)
 
         for key in [
             "proposals",

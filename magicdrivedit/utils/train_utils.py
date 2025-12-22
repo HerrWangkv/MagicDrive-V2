@@ -67,10 +67,14 @@ def run_brushnet_validation(
         x = batch["pixel_values"].to(device, dtype)
         x = rearrange(x, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
         human_mask = batch["human_masks"].to(device, dtype)
+        human_img = batch["human_img"].to(device, dtype)
         human_mask = rearrange(
             human_mask, "B T NC C ... -> (B NC) C T ..."
         )  # BxNC, C, T, H, W
-        x_human = torch.where(human_mask > 0.5, x, torch.ones_like(x))
+        human_img = rearrange(
+            human_img, "B T NC C ... -> (B NC) C T ..."
+        )  # BxNC, C, T, H, W
+        x_human = torch.where(human_mask > 0.5, human_img, torch.ones_like(x))
         del x
         # x_human and human_mask are NOT encoded/interpolated by VAE
         # They will be processed by the shallow encoder in the model

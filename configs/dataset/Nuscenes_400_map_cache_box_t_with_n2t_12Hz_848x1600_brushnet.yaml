@@ -71,6 +71,7 @@ dataset:
       type: Collect3D
       keys:  # keep as origin
         - img
+        - human_img
         - human_mask
         # - points
         - gt_bboxes_3d
@@ -137,6 +138,7 @@ dataset:
       type: Collect3D
       keys:
         - img
+        - human_img
         - human_mask
         # - points
         - gt_bboxes_3d

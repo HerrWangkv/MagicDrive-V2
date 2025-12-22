@@ -616,10 +616,14 @@ def collate_fn_single_clip(
     pixel_values = pixel_values.to(
         memory_format=torch.contiguous_format).float()
     if "human_mask" in examples[0]:
+        assert "human_img" in examples[0], "human_mask needs human_img"
         human_masks = torch.stack([example["human_mask"].data for example in examples])
         human_masks = human_masks.to(memory_format=torch.contiguous_format).float()
+        human_imgs = torch.stack([example["human_img"].data for example in examples])
+        human_imgs = human_imgs.to(memory_format=torch.contiguous_format).float()
     else:
         human_masks = None
+        human_imgs = None
 
     # mask
     if "gt_aux_bev" in examples[0] and examples[0]["gt_aux_bev"] is not None:
@@ -662,6 +666,8 @@ def collate_fn_single_clip(
     }
     if human_masks is not None:
         ret_dict["human_masks"] = human_masks
+    if human_imgs is not None:
+        ret_dict["human_imgs"] = human_imgs
 
     if "next2top" in examples[0]:
         next2top = []

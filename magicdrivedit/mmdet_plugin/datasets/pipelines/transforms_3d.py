@@ -164,18 +164,22 @@ class ImageHumanMaskAug3D:
         return resize, resize_dims, crop, flip, rotate
 
     def img_mask_transform(
-        self, img, mask, rotation, translation, resize, resize_dims, crop, flip, rotate
+        self, img, human_img, human_mask, rotation, translation, resize, resize_dims, crop, flip, rotate
     ):
         # adjust image
         img = img.resize(resize_dims)
-        mask = mask.resize(resize_dims)
+        human_img = human_img.resize(resize_dims)
+        human_mask = human_mask.resize(resize_dims)
         img = img.crop(crop)
-        mask = mask.crop(crop)
+        human_img = human_img.crop(crop)
+        human_mask = human_mask.crop(crop)
         if flip:
             img = img.transpose(method=Image.FLIP_LEFT_RIGHT)
-            mask = mask.transpose(method=Image.FLIP_LEFT_RIGHT)
+            human_img = human_img.transpose(method=Image.FLIP_LEFT_RIGHT)
+            human_mask = human_mask.transpose(method=Image.FLIP_LEFT_RIGHT)
         img = img.rotate(rotate)
-        mask = mask.rotate(rotate)
+        human_img = human_img.rotate(rotate)
+        human_mask = human_mask.rotate(rotate)
 
         # post-homography transformation
         rotation *= resize
@@ -197,21 +201,24 @@ class ImageHumanMaskAug3D:
         rotation = A.matmul(rotation)
         translation = A.matmul(translation) + b
 
-        return img, mask, rotation, translation
+        return img, human_img, human_mask, rotation, translation
 
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
         imgs = data["img"]
-        masks = data["human_mask"]
+        human_imgs = data["human_img"]
+        human_masks = data["human_mask"]
         new_imgs = []
-        new_masks = []
+        new_human_imgs = []
+        new_human_masks = []
         transforms = []
-        for img, mask in zip(imgs, masks):
+        for img, human_img, human_mask in zip(imgs, human_imgs, human_masks):
             resize, resize_dims, crop, flip, rotate = self.sample_augmentation(data)
             post_rot = torch.eye(2)
             post_tran = torch.zeros(2)
-            new_img, new_mask, rotation, translation = self.img_mask_transform(
+            new_img, new_human_img, new_human_mask, rotation, translation = self.img_mask_transform(
                 img,
-                mask,
+                human_img,
+                human_mask,
                 post_rot,
                 post_tran,
                 resize=resize,
@@ -224,10 +231,12 @@ class ImageHumanMaskAug3D:
             transform[:2, :2] = rotation
             transform[:2, 3] = translation
             new_imgs.append(new_img)
-            new_masks.append(new_mask)
+            new_human_imgs.append(new_human_img)
+            new_human_masks.append(new_human_mask)
             transforms.append(transform.numpy())
         data["img"] = new_imgs
-        data["human_mask"] = new_masks
+        data["human_img"] = new_human_imgs
+        data["human_mask"] = new_human_masks
         # update the calibration matrices
         data["img_aug_matrix"] = transforms
         return data
@@ -817,6 +826,7 @@ class ReorderMultiViewImagesHumanMasks:
         "camera2lidar",
         "filename",
         "img",
+        "human_img",
         "human_mask",
         "img_aug_matrix",
     ]
@@ -1245,6 +1255,7 @@ class ImageNormalize:
 
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
         data["img"] = [self.compose(img) for img in data["img"]]
+        data["human_img"] = [self.compose(img) for img in data["human_img"]]
         data["img_norm_cfg"] = dict(mean=self.mean, std=self.std)
         return data
 
