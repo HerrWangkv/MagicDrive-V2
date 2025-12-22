@@ -332,6 +332,7 @@ class NuScenes12HzPipeline:
                     
                     final_canvas = np.zeros((H, W, 3), dtype=np.uint8)
                     global_depth = np.full((H, W), np.inf, dtype=np.float32)
+                    final_mask_buffer = np.zeros((H, W), dtype=np.uint8)
                     render_list = []
                     
                     for inst_tok, texture in final_textures.items():
@@ -396,11 +397,21 @@ class NuScenes12HzPipeline:
                             
                             cam_t_t = torch.tensor(cam_t_crop, dtype=torch.float32).unsqueeze(0).to(self.processor.device)
                             vertices = self.processor.compute_vertices(smpl_params)
-                            render_list.append(({'vertices': vertices, 'cam_t': cam_t_t, 'crop_info': {'tform': tform}, 'depth_scale': depth_scale}, texture))
+                            pos_cam_tensor = torch.tensor(pos_cam, dtype=torch.float32).to(self.processor.device)
+                            
+                            render_list.append(({
+                                'vertices': vertices, 
+                                'cam_t': cam_t_t,           # Fallback
+                                'pos_cam': pos_cam_tensor,  # <--- NEW: Trajectory Position
+                                'crop_info': {'tform': tform}, 
+                                'depth_scale': depth_scale, # (Legacy, not needed for real_K but keep safe)
+                                'intrinsics': K             # Store K here for convenience
+                            }, texture))
                     
                     if render_list:
                         for r_data, tex in render_list:
-                            render, mask, depth = self.processor.render_colored_mesh(r_data, tex, (H, W))
+                            real_K = all_intrinsics[f_idx][cam_name]
+                            render, mask, depth = self.processor.render_colored_mesh(r_data, tex, (H, W), intrinsics=real_K)
                             scale = r_data['depth_scale']
                             real_depth = depth * scale
                             foreground_candidate = mask & (real_depth > 0)
@@ -413,9 +424,12 @@ class NuScenes12HzPipeline:
                             
                             final_canvas[update_indices] = render[update_indices]
                             global_depth[update_indices] = real_depth[update_indices] # Store Real Depth
+                            final_mask_buffer[update_indices] = 255
                         
                         out_name = Path(img_path).name.replace('.jpg', '.png')
                         cv2.imwrite(str(Path(save_root)/out_name), final_canvas)
+                        mask_name = Path(img_path).name.replace('.jpg', '_mask.png')
+                        cv2.imwrite(str(Path(save_root)/mask_name), final_mask_buffer)
 
 if __name__ == "__main__":
     import argparse

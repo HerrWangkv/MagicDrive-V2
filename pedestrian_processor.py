@@ -282,6 +282,7 @@ class PedestrianProcessor:
     def project_and_sample_vertices(self, smpl_out, image, seg_mask, id_map, depth_map, current_id):
         """
         Project vertices to image, filter by mask and ID, and sample colors.
+        FIXED: Better color sampling with bilinear interpolation and proper weighting.
         """
         vertices = smpl_out['vertices'][0] # (V, 3)
         cam_t = smpl_out['cam_t'][0]       # (3,)
@@ -319,7 +320,7 @@ class PedestrianProcessor:
         u_int = np.round(u_full).astype(np.int32)
         v_int = np.round(v_full).astype(np.int32)
         
-        valid_mask = (u_int >= 0) & (u_int < W) & (v_int >= 0) & (v_int < H)
+        valid_mask = (u_int >= 1) & (u_int < W-1) & (v_int >= 1) & (v_int < H-1)  # Keep 1px margin for bilinear
         
         # Filter by SegMask and ID Map
         final_mask = np.zeros(vertices.shape[0], dtype=bool)
@@ -335,7 +336,6 @@ class PedestrianProcessor:
             is_person = seg_mask[vs, us]
             
             # Check ID Map (is Visible/Not Occluded?)
-            # Relaxed check: visible if it matches ID OR if it's background (0)
             is_visible_id = (id_map[vs, us] == current_id) | (id_map[vs, us] == 0)
             
             # Check Depth (Self-Occlusion)
@@ -347,34 +347,70 @@ class PedestrianProcessor:
             keep = is_person & is_visible_id & is_visible_depth
             final_mask[valid_indices[keep]] = True
             
-        # 4. Sample Colors
+        # 4. Sample Colors with BILINEAR INTERPOLATION
         vertex_colors = np.zeros((vertices.shape[0], 3), dtype=np.float32)
         vertex_weights = np.zeros((vertices.shape[0], 1), dtype=np.float32)
         
         if np.any(final_mask):
-            us = u_int[final_mask]
-            vs = v_int[final_mask]
+            # Get sub-pixel coordinates
+            u_subpix = u_full[final_mask]
+            v_subpix = v_full[final_mask]
             
-            # Sample from image (BGR -> RGB)
-            colors = image[vs, us, ::-1].astype(np.float32) / 255.0
+            # Bilinear interpolation
+            u0 = np.floor(u_subpix).astype(np.int32)
+            v0 = np.floor(v_subpix).astype(np.int32)
+            u1 = u0 + 1
+            v1 = v0 + 1
+            
+            # Clip to valid range
+            u0 = np.clip(u0, 0, W-1)
+            u1 = np.clip(u1, 0, W-1)
+            v0 = np.clip(v0, 0, H-1)
+            v1 = np.clip(v1, 0, H-1)
+            
+            # Compute interpolation weights
+            wu = u_subpix - u0
+            wv = v_subpix - v0
+            wu = np.clip(wu, 0, 1)
+            wv = np.clip(wv, 0, 1)
+            
+            # Sample 4 corners (BGR -> RGB)
+            img_rgb = image[:, :, ::-1].astype(np.float32) / 255.0
+            
+            c00 = img_rgb[v0, u0]  # top-left
+            c01 = img_rgb[v0, u1]  # top-right
+            c10 = img_rgb[v1, u0]  # bottom-left
+            c11 = img_rgb[v1, u1]  # bottom-right
+            
+            # Bilinear interpolation
+            wu = wu[:, np.newaxis]
+            wv = wv[:, np.newaxis]
+            colors = (c00 * (1 - wu) * (1 - wv) +
+                    c01 * wu * (1 - wv) +
+                    c10 * (1 - wu) * wv +
+                    c11 * wu * wv)
             
             # Calculate Weight based on BBox Height (Resolution)
-            # Use height^4 to strongly prefer high-res frames
-            bbox_height = smpl_out.get('bbox_height', 100.0)
-            w = bbox_height ** 4
+            # FIXED: Use height^2 instead of height^4 (less extreme)
+            # FIXED: Add minimum resolution threshold
+            bbox_height = max(smpl_out.get('bbox_height', 100.0), 50.0)  # At least 50px
+            w = bbox_height ** 2
             
-            # Use constant weight per frame (but masked by visibility)
-            num_visible = np.sum(keep)
+            # FIXED: Don't pre-multiply colors by weight
+            # Store raw weighted sum and weights separately
+            num_visible = np.sum(final_mask)
             weights = np.full((num_visible, 1), w, dtype=np.float32)
             
-            vertex_colors[final_mask] = colors * weights # Weighted Color
+            vertex_colors[final_mask] = colors * weights  # Weighted sum
             vertex_weights[final_mask] = weights
             
         return vertex_colors, vertex_weights
 
+
     def inpaint_missing_colors(self, vertex_sums, vertex_counts):
         """
         Fill missing colors using Symmetry then KNN.
+        FIXED: Added median filtering for outliers.
         """
         # 1. Basic Average
         counts_safe = vertex_counts.copy()
@@ -387,7 +423,8 @@ class PedestrianProcessor:
         if not np.any(valid_mask):
             return np.ones_like(avg_colors) * 0.5
         if not np.any(missing_mask):
-            return avg_colors
+            # FIXED: Apply median filter to remove color outliers
+            return self._median_filter_colors(avg_colors, valid_mask)
 
         # 2. Symmetry Inpainting
         missing_indices = np.where(missing_mask)[0]
@@ -403,7 +440,7 @@ class PedestrianProcessor:
             missing_mask[fill_indices] = False
         
         if not np.any(missing_mask):
-            return avg_colors
+            return self._median_filter_colors(avg_colors, valid_mask)
 
         # 3. KNN Inpainting for remaining holes
         template_verts = self.hmr2_model.smpl.v_template.cpu().numpy()
@@ -423,50 +460,106 @@ class PedestrianProcessor:
         
         avg_colors[remaining_missing_indices] = filled_colors
         
-        return avg_colors
+        # FIXED: Apply median filter to final result
+        full_valid_mask = np.ones(len(avg_colors), dtype=bool)
+        return self._median_filter_colors(avg_colors, full_valid_mask)
 
-    def render_colored_mesh(self, smpl_out, vertex_colors, image_shape, use_lighting=False):
+
+    def _median_filter_colors(self, colors, valid_mask):
         """
-        Render mesh directly to full image coordinates (Optimized with ROI).
-        UPDATED: Now returns (render, mask, depth) for Z-buffering.
+        Apply spatial median filtering to remove color outliers.
+        Uses mesh connectivity for spatial neighborhood.
         """
-        vertices = smpl_out['vertices']
-        cam_t = smpl_out['cam_t']
-        crop_info = smpl_out['crop_info']
+        if np.sum(valid_mask) < 10:
+            return colors
+        
+        # Get mesh faces
+        faces = self.hmr2_model.smpl.faces
+        
+        # Build vertex neighbor list
+        neighbors = [set() for _ in range(len(colors))]
+        for face in faces:
+            for i in range(3):
+                for j in range(3):
+                    if i != j:
+                        neighbors[face[i]].add(face[j])
+        
+        # Apply median filter only to valid vertices
+        filtered_colors = colors.copy()
+        
+        for i in np.where(valid_mask)[0]:
+            if len(neighbors[i]) < 3:
+                continue
+            
+            # Get neighbor colors
+            neighbor_list = list(neighbors[i])
+            neighbor_colors = colors[neighbor_list]
+            neighbor_valid = valid_mask[neighbor_list]
+            
+            if np.sum(neighbor_valid) >= 3:
+                valid_neighbor_colors = neighbor_colors[neighbor_valid]
+                # Include self
+                all_colors = np.vstack([colors[i:i+1], valid_neighbor_colors])
+                # Take median for each channel
+                filtered_colors[i] = np.median(all_colors, axis=0)
+        
+        return filtered_colors
+
+    def render_colored_mesh(self, smpl_out, vertex_colors, image_shape, use_lighting=False, intrinsics=None):
+        vertices = smpl_out['vertices'] # (1, V, 3)
         H, W = image_shape[:2]
         
-        # 1. Calculate Full Image Camera Intrinsics
-        tform = crop_info['tform']
-        tform_inv = cv2.invertAffineTransform(tform)
-        
-        s_x = tform_inv[0, 0]
-        s_y = tform_inv[1, 1]
-        t_x = tform_inv[0, 2]
-        t_y = tform_inv[1, 2]
-        
-        f_crop = 5000.0
-        c_crop = 128.0
-        
-        f_x = s_x * f_crop
-        f_y = s_y * f_crop
-        c_x = s_x * c_crop + t_x
-        c_y = s_y * c_crop + t_y
-        
-        # --- OPTIMIZATION: Calculate ROI ---
-        corners_crop = np.array([
-            [0, 0], [256, 0], [256, 256], [0, 256]
-        ], dtype=np.float32)
-        corners_crop_hom = np.hstack([corners_crop, np.ones((4, 1))]) # (4, 3)
-        corners_full = (tform_inv @ corners_crop_hom.T).T # (4, 2)
-        
-        min_x = np.min(corners_full[:, 0])
-        max_x = np.max(corners_full[:, 0])
-        min_y = np.min(corners_full[:, 1])
-        max_y = np.max(corners_full[:, 1])
-        
+        # === FIX: USE TRAJECTORY POSITION ===
+        # If using Real Intrinsics, we must use the Real Position (pos_cam),
+        # not the Crop Position (cam_t).
+        if intrinsics is not None and 'pos_cam' in smpl_out:
+            T_mesh = smpl_out['pos_cam'] # (3,) Tensor
+            
+            # Use Real Intrinsics
+            f_x, f_y = intrinsics[0, 0], intrinsics[1, 1]
+            c_x, c_y = intrinsics[0, 2], intrinsics[1, 2]
+            
+            # Recalculate ROI using the real projection
+            # We project the vertices roughly to guess bounds
+            # Or use the crop info as a heuristic
+            tform = smpl_out['crop_info']['tform']
+            tform_inv = cv2.invertAffineTransform(tform)
+            corners_crop = np.array([[0, 0], [256, 0], [256, 256], [0, 256]], dtype=np.float32)
+            corners_crop_hom = np.hstack([corners_crop, np.ones((4, 1))])
+            corners_full = (tform_inv @ corners_crop_hom.T).T
+            min_x, max_x = np.min(corners_full[:, 0]), np.max(corners_full[:, 0])
+            min_y, max_y = np.min(corners_full[:, 1]), np.max(corners_full[:, 1])
+            
+        else:
+            # Fallback: Legacy HMR Crop Logic
+            T_mesh = smpl_out['cam_t'][0] # (3,)
+            
+            crop_info = smpl_out['crop_info']
+            tform = crop_info['tform']
+            tform_inv = cv2.invertAffineTransform(tform)
+            s_x, s_y = tform_inv[0, 0], tform_inv[1, 1]
+            t_x, t_y = tform_inv[0, 2], tform_inv[1, 2]
+            f_crop, c_crop = 5000.0, 128.0
+            
+            f_x, f_y = s_x * f_crop, s_y * f_crop
+            c_x, c_y = s_x * c_crop + t_x, s_y * c_crop + t_y
+            
+            corners_crop = np.array([[0, 0], [256, 0], [256, 256], [0, 256]], dtype=np.float32)
+            corners_crop_hom = np.hstack([corners_crop, np.ones((4, 1))])
+            corners_full = (tform_inv @ corners_crop_hom.T).T
+            min_x, max_x = np.min(corners_full[:, 0]), np.max(corners_full[:, 0])
+            min_y, max_y = np.min(corners_full[:, 1]), np.max(corners_full[:, 1])
+
+        # === APPLY TRANSLATION ===
+        # Move mesh to Camera Space
+        if vertices.ndim == 3:
+             verts_cam = vertices + T_mesh.view(1, 1, 3)
+        else:
+             verts_cam = vertices + T_mesh.view(1, 3)
+
+        # ROI Padding & Bounds
         pad_x = (max_x - min_x) * 0.5
         pad_y = (max_y - min_y) * 0.5
-        
         roi_min_x = int(max(0, min_x - pad_x))
         roi_min_y = int(max(0, min_y - pad_y))
         roi_max_x = int(min(W, max_x + pad_x))
@@ -482,20 +575,18 @@ class PedestrianProcessor:
         c_x_roi = c_x - roi_min_x
         c_y_roi = c_y - roi_min_y
         
-        # 2. Setup Camera
+        # Setup Camera
         R_fix = torch.tensor([[-1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]], device=self.device)
         
         cameras = PerspectiveCameras(
             device=self.device,
             focal_length=((f_x, f_y),),
             principal_point=((c_x_roi, c_y_roi),),
-            image_size=((roi_h, roi_w),), # Render to ROI size
+            image_size=((roi_h, roi_w),),
             in_ndc=False,
             R=R_fix.unsqueeze(0),
-            T=torch.zeros_like(cam_t)
+            T=torch.zeros((1, 3), device=self.device) # T is already applied to verts_cam
         )
-        
-        verts_cam = vertices + cam_t.unsqueeze(1)
         
         faces_tensor = torch.from_numpy(self.hmr2_model.smpl.faces.astype(np.int64)).to(self.device).unsqueeze(0)
         
@@ -680,6 +771,48 @@ class PoseProcessor:
         matrix = np.stack((b1, b2, b3), axis=-1)
         return matrix.reshape(*batch_dim, 3, 3)
     
+    def correct_outliers_with_trend(self, pose_mat, cam, window_size=5, thresh_trans=0.5, thresh_rot=0.5):
+        """
+        Calculates a robust trend (median filter) for Position and Root Rotation.
+        Overwrites outliers with the trend value to prevent glitches.
+        """
+        n = len(cam)
+        if n < 5: return pose_mat, cam
+
+        if window_size % 2 == 0: window_size += 1
+        pad_w = window_size // 2
+
+        # 1. Position Trend (Median Filter)
+        cam_pad = np.pad(cam, ((pad_w, pad_w), (0, 0)), mode='edge')
+        cam_trend = np.zeros_like(cam)
+        for i in range(3):
+            cam_trend[:, i] = medfilt(cam_pad[:, i], kernel_size=window_size)[pad_w:-pad_w]
+
+        # 2. Root Rotation Trend (6D Median Filter)
+        root_rot = pose_mat[:, 0] # (N, 3, 3)
+        root_6d = self.matrix_to_rotation_6d(root_rot.reshape(n, 1, 3, 3)).reshape(n, 6)
+        
+        root_pad = np.pad(root_6d, ((pad_w, pad_w), (0, 0)), mode='edge')
+        root_trend_6d = np.zeros_like(root_6d)
+        for i in range(6):
+            root_trend_6d[:, i] = medfilt(root_pad[:, i], kernel_size=window_size)[pad_w:-pad_w]
+
+        # 3. Overwrite Outliers
+        # Position
+        dist_cam = np.linalg.norm(cam - cam_trend, axis=1)
+        bad_cam_mask = dist_cam > thresh_trans
+        if np.any(bad_cam_mask):
+            cam[bad_cam_mask] = cam_trend[bad_cam_mask]
+            
+        # Rotation
+        dist_rot = np.linalg.norm(root_6d - root_trend_6d, axis=1)
+        bad_rot_mask = dist_rot > thresh_rot
+        if np.any(bad_rot_mask):
+            fixed_roots = self.rotation_6d_to_matrix(root_trend_6d[bad_rot_mask])
+            pose_mat[bad_rot_mask, 0] = fixed_roots
+
+        return pose_mat, cam
+
     def process_sequence(self, sparse_data, total_frames, full_cam2world=None):
         indices = np.array(sparse_data['frame_indices'])
         pose = np.array(sparse_data['pose']) 
@@ -687,11 +820,10 @@ class PoseProcessor:
         cam = np.array(sparse_data['cam']) 
         tform = np.array(sparse_data['tform']) 
         
-        # EARLY EXIT: If we have almost no data, don't try to hallucinate a person
-        if len(indices) < 2: 
-            return None
+        # EARLY EXIT
+        if len(indices) < 2: return None
 
-        # 1. Store the FULL span of the person's existence
+        # 1. Standard Packing & Sorting
         orig_min_idx = indices.min()
         orig_max_idx = indices.max()
             
@@ -704,7 +836,6 @@ class PoseProcessor:
         else:
             raise ValueError(f"Unknown pose shape: {pose.shape}")
 
-        # --- Sort & Deduplicate ---
         sort_order = np.argsort(indices)
         indices = indices[sort_order]
         pose_mat = pose_mat[sort_order]
@@ -712,13 +843,10 @@ class PoseProcessor:
         cam = cam[sort_order]
         tform = tform[sort_order]
 
+        # Deduplicate
         unique_indices, counts = np.unique(indices, return_counts=True)
         if len(unique_indices) < len(indices):
-            new_pose = []
-            new_betas = []
-            new_cam = []
-            new_tform = []
-            
+            new_pose, new_betas, new_cam, new_tform = [], [], [], []
             for u_idx in unique_indices:
                 mask = (indices == u_idx)
                 new_betas.append(np.mean(betas[mask], axis=0))
@@ -736,47 +864,14 @@ class PoseProcessor:
             cam = np.array(new_cam)
             tform = np.array(new_tform)
 
-        # --- Outlier Masking ---
-        valid_mask = np.ones(len(indices), dtype=bool)
-        
-        if len(indices) > 5:
-            # A. Shape Consistency
-            median_betas = np.median(betas, axis=0)
-            dist_betas = np.linalg.norm(betas - median_betas, axis=1)
-            valid_mask = valid_mask & (dist_betas < 5.0)
+        # --- [STEP 1]: Trend-based Correction (Outlier Fix) ---
+        # We keep this to fix "teleporting" glitches, but use a small window
+        pose_mat, cam = self.correct_outliers_with_trend(
+            pose_mat, cam, window_size=5, thresh_trans=0.5, thresh_rot=0.5
+        )
 
-            # B. Pose Consistency
-            p_6d = self.matrix_to_rotation_6d(pose_mat)
-            p_flat = p_6d.reshape(len(indices), -1)
-            median_pose = np.median(p_flat, axis=0)
-            dist_pose = np.linalg.norm(p_flat - median_pose, axis=1)
-            valid_mask = valid_mask & (dist_pose < 15.0)
-
-        # C. Position Consistency
-        if len(indices) > 2:
-            median_cam = np.median(cam, axis=0)
-            dist_cam = np.linalg.norm(cam - median_cam, axis=1)
-            valid_mask = valid_mask & (dist_cam < 50.0)
-
-        # Apply Mask
-        indices = indices[valid_mask]
-        pose_mat = pose_mat[valid_mask]
-        betas = betas[valid_mask]
-        cam = cam[valid_mask]
-        tform = tform[valid_mask]
-
-        if len(indices) < 2:
-            return None
-
-        # --- Convert Root to World ---
-        if full_cam2world is not None:
-            sparse_c2w = full_cam2world[indices]
-            R_c2w = sparse_c2w[:, :3, :3]
-            root_rot_cam = pose_mat[:, 0]
-            root_rot_world = np.matmul(R_c2w, root_rot_cam)
-            pose_mat[:, 0] = root_rot_world
-            
-        # --- Interpolation Setup ---
+        # 2. Interpolation
+        all_indices = np.arange(total_frames)
         full_pose = np.zeros((total_frames, 24, 3, 3))
         full_betas = np.zeros((total_frames, betas.shape[1]))
         full_cam = np.zeros((total_frames, cam.shape[1]))
@@ -805,8 +900,6 @@ class PoseProcessor:
                 'valid_range': (orig_min_idx, orig_max_idx)
             }
 
-        all_indices = np.arange(total_frames)
-        
         # Linear Interp for Vectors
         for i in range(betas.shape[1]):
             full_betas[:, i] = np.interp(all_indices, indices, betas[:, i])
@@ -841,12 +934,14 @@ class PoseProcessor:
             if max_idx > slerp_max:
                 full_pose[slerp_max+1:max_idx+1, j] = pose_mat[-1, j]
             
-        # --- Smoothing ---
+        # --- [STEP 2]: Final Smoothing ---
+        # [MODIFICATION]: We smooth BODY POSE (jittery HMR) but NOT POSITION (LAG)
+        
         pose_6d = self.matrix_to_rotation_6d(full_pose)
         pose_6d_flat = pose_6d.reshape(total_frames, -1)
         
-        target_traj_window = 21 
-        target_pose_window = 7  
+        target_rot_window = 31
+        target_body_window = 7
         
         def get_valid_window(target, total):
             w = target if total >= target else total
@@ -854,50 +949,37 @@ class PoseProcessor:
             if w < 3: w = 3 
             return w
             
-        traj_w = get_valid_window(target_traj_window, total_frames)
-        pose_w = get_valid_window(target_pose_window, total_frames)
+        traj_w = get_valid_window(target_rot_window, total_frames)
+        pose_w = get_valid_window(target_body_window, total_frames)
         
         if total_frames >= 3:
-            # --- FIX: Generic N-Dim Median Filter ---
-            def simple_medfilt(x, k=5):
-                pad = k // 2
-                # Construct padding: Pad axis 0 (Time) by (pad, pad), others by (0,0)
-                pad_width = [(pad, pad)] + [(0, 0)] * (x.ndim - 1)
-                x_pad = np.pad(x, pad_width, mode='edge')
-                
-                # Construct kernel: Filter axis 0 by k, others by 1
-                kernel_size = [k] + [1] * (x.ndim - 1)
-                
-                y = medfilt(x_pad, kernel_size=kernel_size)
-                return y[pad:-pad]
 
-            cam_med = simple_medfilt(full_cam, k=3)
-            
-            # Now safe to pass 3D array (T, 24, 6)
+            # 1. Smooth Body Pose (HMR is noisy, needs smoothing)
             pose_6d_reshaped = pose_6d_flat.reshape(total_frames, 24, 6)
-            pose_6d_med = simple_medfilt(pose_6d_reshaped, k=3)
             
-            tform_flat = full_tform.reshape(total_frames, 6)
+            root_6d = pose_6d_reshaped[:, 0, :] 
+            root_smooth = savgol_filter(root_6d, traj_w, 2, axis=0) # Smooth root rotation slightly
             
-            # Savitzky-Golay (Motion Smoothing)
-            betas_smooth = savgol_filter(full_betas, traj_w, 2, axis=0) 
-            cam_smooth = savgol_filter(cam_med, traj_w, 2, axis=0) 
-            tform_smooth = savgol_filter(tform_flat, traj_w, 2, axis=0).reshape(total_frames, 2, 3)
-
-            root_6d = pose_6d_med[:, 0, :] # (T, 6)
-            root_smooth = savgol_filter(root_6d, traj_w, 2, axis=0)
-            
-            body_6d = pose_6d_med[:, 1:, :] # (T, 23, 6)
+            body_6d = pose_6d_reshaped[:, 1:, :] 
             body_smooth = savgol_filter(body_6d, pose_w, 2, axis=0)
+
             pose_6d_smooth = np.concatenate([root_smooth[:, None, :], body_smooth], axis=1)
+            pose_smooth_mat = self.rotation_6d_to_matrix(pose_6d_smooth.reshape(total_frames, 24, 6))
+
+            # 2. Smooth Shape & Crop info
+            betas_smooth = savgol_filter(full_betas, traj_w, 2, axis=0) 
+            tform_smooth = savgol_filter(full_tform.reshape(total_frames, 6), traj_w, 2, axis=0).reshape(total_frames, 2, 3)
+
+            # 3. [CHANGE]: DO NOT SMOOTH POSITION
+            # Use interpolated GT directly to remove lag.
+            cam_smooth = full_cam 
+
         else:
-            pose_6d_smooth = pose_6d_flat.reshape(total_frames, 24, 6)
+            pose_smooth_mat = full_pose
             betas_smooth = full_betas
             cam_smooth = full_cam
             tform_smooth = full_tform
             
-        pose_smooth_mat = self.rotation_6d_to_matrix(pose_6d_smooth.reshape(total_frames, 24, 6))
-        
         if full_cam2world is not None:
             R_c2w_full = full_cam2world[:, :3, :3]
             R_w2c_full = np.transpose(R_c2w_full, (0, 2, 1))
