@@ -195,7 +195,7 @@ srun --overlap --label --export=ALL --ntasks-per-node=1 --gres=gpu:4 \
     --bind /home/hk-project-p0023969/xw2723/test/MagicDrive-V2:/MagicDrive-V2 \
     --bind "${BEEOND_MOUNTPOINT}:${BEEOND_MOUNTPOINT}" \
     --bind "${MOUNT_PATH_RAW}:/data/nuscenes" \
-    --bind /hkfs/work/workspace/scratch/xw2723-nuscenes/nuscenes_masks:/data/nuscenes_masks \
+    --bind /hkfs/work/workspace/scratch/xw2723-nuscenes/nuscenes_pedestrian:/data/nuscenes_pedestrian \
     --bind /hkfs/work/workspace/scratch/xw2723-nuscenes/interp_12Hz_trainval:/MagicDrive-V2/data/nuscenes/interp_12Hz_trainval \
     --bind /hkfs/work/workspace/scratch/xw2723-nuscenes/nuscenes_map_aux_12Hz:/MagicDrive-V2/data/nuscenes_map_aux_12Hz \
     --bind /hkfs/work/workspace/scratch/xw2723-nuscenes/nuscenes_mmdet3d-12Hz:/MagicDrive-V2/data/nuscenes_mmdet3d-12Hz \

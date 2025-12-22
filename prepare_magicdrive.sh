@@ -33,11 +33,11 @@ docker run -it --rm --gpus all --name MagicDrive2 \
         fi
     done
     
-    # Create symbolic link for data/nuscenes_masks to /data/nuscenes_masks
-    if [ -L \"/data/nuscenes_masks\" ] || [ -e \"/data/nuscenes_masks\" ]; then
-        rm -f \"/data/nuscenes_masks\"
+    # Create symbolic link for data/nuscenes_pedestrian to /data/nuscenes_pedestrian
+    if [ -L \"/data/nuscenes_pedestrian\" ] || [ -e \"/data/nuscenes_pedestrian\" ]; then
+        rm -f \"/data/nuscenes_pedestrian\"
     fi
-    ln -s /MagicDrive-V2/data/nuscenes_masks /data/
+    ln -s /MagicDrive-V2/data/nuscenes_pedestrian /data/
     
     # Start interactive bash session
     exec /bin/bash
