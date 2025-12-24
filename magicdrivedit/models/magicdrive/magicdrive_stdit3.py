@@ -2075,12 +2075,22 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
             else:
                 cutoff_radius = r0
 
-            structured_noise_flat = generate_structured_noise_batch_vectorized(
-                x_flat.cpu().float(),
-                cutoff_radius=cutoff_radius,
-                transition_width=2.0,
-                input_noise=input_noise,
-            )
+            # Process in chunks to avoid OOM in quantile
+            chunk_size = 4
+            structured_noise_list = []
+            for i in range(0, x_flat.shape[0], chunk_size):
+                x_chunk = x_flat[i : i + chunk_size].cpu().float()
+                noise_chunk = input_noise[i : i + chunk_size]
+
+                out_chunk = generate_structured_noise_batch_vectorized(
+                    x_chunk,
+                    cutoff_radius=cutoff_radius,
+                    transition_width=2.0,
+                    input_noise=noise_chunk,
+                )
+                structured_noise_list.append(out_chunk)
+
+            structured_noise_flat = torch.cat(structured_noise_list, dim=0)
             structured_noise_flat = structured_noise_flat.to(
                 device=x_flat.device, dtype=x_flat.dtype
             )
