@@ -507,8 +507,7 @@ def main():
                     human_img = rearrange(
                         human_img, "B T NC C ... -> (B NC) C T ..."
                     )  # BxNC, C, T, H, W
-                    breakpoint()
-                    x_human = torch.where(human_mask > 0.5, human_img, torch.ones_like(x)) # white background ##TODO:save and check
+                    x_human = torch.where(human_mask > 0.5, human_img, torch.rand_like(x) * 2 - 1) # random background 
                     y = batch.pop("captions")[0]  # B, just take first frame
                     maps = batch.pop("bev_map_with_aux").to(device, dtype)  # B, T, C, H, W
                     bbox = batch.pop("bboxes_3d_data")
