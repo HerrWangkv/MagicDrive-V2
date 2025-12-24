@@ -67,7 +67,7 @@ def run_brushnet_validation(
         x = batch["pixel_values"].to(device, dtype)
         x = rearrange(x, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
         human_mask = batch["human_masks"].to(device, dtype)
-        human_img = batch["human_img"].to(device, dtype)
+        human_img = batch["human_imgs"].to(device, dtype)
         human_mask = rearrange(
             human_mask, "B T NC C ... -> (B NC) C T ..."
         )  # BxNC, C, T, H, W
