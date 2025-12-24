@@ -210,9 +210,13 @@ def run_brushnet_validation(
         human_mask = rearrange(
             human_mask, "B T NC C ... -> B NC C T ..."
         )  # BxNC, C, T, H, W
+        human_img = batch.pop("human_imgs").to(device, dtype)
+        human_img = rearrange(
+            human_img, "B T NC C ... -> B NC C T ..."
+        )  # BxNC, C, T, H, W
 
         # Create human-only version with white background
-        x_human_only = torch.where(human_mask > 0.5, x, torch.ones_like(x))
+        x_human_only = torch.where(human_mask > 0.5, human_img, torch.ones_like(x))
 
         torch.cuda.empty_cache()
         logging.info("start gather gt ...")
