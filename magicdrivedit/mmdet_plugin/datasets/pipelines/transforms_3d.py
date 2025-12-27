@@ -1255,7 +1255,8 @@ class ImageNormalize:
 
     def __call__(self, data: Dict[str, Any]) -> Dict[str, Any]:
         data["img"] = [self.compose(img) for img in data["img"]]
-        data["human_img"] = [self.compose(img) for img in data["human_img"]]
+        if "human_img" in data:
+            data["human_img"] = [self.compose(img) for img in data["human_img"]]
         data["img_norm_cfg"] = dict(mean=self.mean, std=self.std)
         return data
 
