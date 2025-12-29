@@ -1,0 +1,51 @@
+FROM nvidia/cuda:12.1.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/usr/local/cuda/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+
+# 1. System Deps
+RUN apt-get update && apt-get install -y \
+    libgl1 libegl1 git wget python3.10 python3-pip python3.10-dev \
+    ffmpeg libsm6 libxext6 build-essential \
+    squashfuse fuse \
+    && rm -rf /var/lib/apt/lists/*
+
+# Symlink python
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python
+
+# 2. Core AI
+RUN pip install --upgrade pip
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# 3. OpenMMLab
+RUN pip install -U openmim
+RUN mim install mmengine "mmcv>=2.0.0" "mmdet>=3.0.0" "mmdet3d>=1.1.0"
+
+# 4. HMR Deps
+# Detectron2
+# Use --no-build-isolation to use the installed torch
+RUN python -m pip install 'git+https://github.com/facebookresearch/detectron2.git' --no-build-isolation
+
+# PyTorch3D
+RUN pip install "git+https://github.com/facebookresearch/pytorch3d.git" --no-build-isolation
+
+RUN pip install pytorch-lightning smplx
+RUN pip install chumpy --no-build-isolation
+
+# Install 4D-Humans (HMR2)
+WORKDIR /deps
+RUN git clone https://github.com/shubham-goel/4D-Humans.git
+# HMR2 setup.py requires chumpy, which fails with build isolation.
+# We already installed chumpy above, so we use --no-build-isolation here too.
+# We also drop -e (editable) because it fails with --no-build-isolation on some backends.
+RUN cd 4D-Humans && pip install . --no-build-isolation
+
+# 5. SegFormer
+RUN pip install transformers accelerate scipy timm
+
+# Additional utilities
+# Downgrade numpy to <2.0 to avoid compatibility issues with matplotlib/nuscenes
+RUN pip install "numpy<2.0" opencv-python matplotlib scikit-image nuscenes-devkit
+
+WORKDIR /workspace/MagicDrive-V2

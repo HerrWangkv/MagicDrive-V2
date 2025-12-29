@@ -1,140 +1,161 @@
 """
 @file   extract_masks.py
-@author Jianfei Guo, Shanghai AI Lab
-@brief  Extract semantic mask
-
-Using SegFormer, 2021. Cityscapes 83.2%
-Relies on timm==0.3.2 & pytorch 1.8.1 (buggy on pytorch >= 1.9)
-
-Installation:
-    NOTE: mmcv-full==1.2.7 requires another pytorch version & conda env.
-        Currently mmcv-full==1.2.7 does not support pytorch>=1.9; 
-            will raise AttributeError: 'super' object has no attribute '_specify_ddp_gpu_num'
-        Hence, a seperate conda env is needed.
-
-    git clone https://github.com/NVlabs/SegFormer
-
-    conda create -n segformer python=3.8
-    conda activate segformer
-    # conda install pytorch==1.8.1 torchvision==0.9.1 torchaudio==0.8.1 cudatoolkit=11.3 -c pytorch -c conda-forge
-    pip install torch==1.8.1+cu111 torchvision==0.9.1+cu111 torchaudio==0.8.1 -f https://download.pytorch.org/whl/torch_stable.html
-
-    pip install timm==0.3.2 pylint debugpy opencv-python attrs ipython tqdm imageio scikit-image omegaconf
-    pip install mmcv-full==1.2.7 --no-cache-dir
-    
-    cd SegFormer
-    pip install .
-
-Usage:
-    Direct run this script in the newly set conda env.
+@brief  Extract semantic masks (Human) using Hugging Face Transformers
+        Replaces legacy mmseg/SegFormer dependencies.
 """
 
+import os
+import cv2
+import torch
+import imageio
+import numpy as np
+import torch.multiprocessing as mp
+from glob import glob
+from tqdm import tqdm
+from argparse import ArgumentParser
+from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 
-from mmseg.apis import inference_segmentor, init_segmentor, show_result_pyplot
-from mmseg.core.evaluation import get_palette
+# Standard Cityscapes Class Mapping (11: Person)
+DATASET_CLASSES = {'human': [11]}
 
-semantic_classes = [
-    'road', 'sidewalk', 'building', 'wall', 'fence', 'pole',
-    'traffic light', 'traffic sign', 'vegetation', 'terrain', 'sky',
-    'person', 'rider', 'car', 'truck', 'bus', 'train', 'motorcycle',
-    'bicycle'
-]
-dataset_classes_in_sematic = {
-    'Vehicle': [13, 14, 15],   # 'car', 'truck', 'bus'
-    'human': [11, 12, 17, 18], # 'person', 'rider', 'motorcycle', 'bicycle'
-}
+def setup_model(device_id):
+    """Load model on specific GPU"""
+    device = f"cuda:{device_id}"
+    model_name = "nvidia/segformer-b5-finetuned-cityscapes-1024-1024"
+    processor = SegformerImageProcessor.from_pretrained(model_name)
+    model = SegformerForSemanticSegmentation.from_pretrained(model_name, use_safetensors=True)
+    model.to(device)
+    model.eval()
+    return processor, model, device
 
-if __name__ == "__main__":
-    import os
-    import imageio
-    import numpy as np
-    from glob import glob
-    from tqdm import tqdm
-    from argparse import ArgumentParser
-    parser = ArgumentParser()
-    # Custom configs
-    parser.add_argument('--data_root', type=str, default='data/nuscenes')
-    parser.add_argument("--save_root", type=str, default='data/nuscenes_masks', help="Where to save the masks")
-    parser.add_argument('--ignore_existing', action='store_true')
+def process_chunk(rank, gpu_ids, files_chunk, save_root, base_root):
+    """
+    Worker function running on a specific GPU.
+    """
+    gpu_id = gpu_ids[rank]
+    try:
+        processor, model, device = setup_model(gpu_id)
+    except Exception as e:
+        print(f"[GPU {gpu_id}] Failed to load model: {e}")
+        return
 
-    # Algorithm configs
-    parser.add_argument('--segformer_path', type=str, default='third_party/SegFormer')
-    parser.add_argument('--config', help='Config file', type=str, default=None)
-    parser.add_argument('--checkpoint', help='Checkpoint file', type=str, default=None)
-    parser.add_argument('--device', default='cuda:0', help='Device used for inference')
+    # Progress bar only for rank 0 to avoid console spam, or simple print for others
+    iterator = tqdm(files_chunk, desc=f"GPU {gpu_id}", position=rank)
 
-    args = parser.parse_args()
-    if args.config is None:
-        args.config = os.path.join(args.segformer_path, 'local_configs', 'segformer', 'B5', 'segformer.b5.1024x1024.city.160k.py')
-    if args.checkpoint is None:
-        args.checkpoint = os.path.join(args.segformer_path, 'pretrained', 'segformer.b5.1024x1024.city.160k.pth')
+    for meta in iterator:
+        # meta contains: (folder_type, cam_name, filename)
+        folder_type, cam, filename = meta
+        
+        # Source Path
+        img_path = os.path.join(base_root, folder_type, cam, filename)
+        
+        # Output Path
+        human_mask_dir = os.path.join(save_root, "human", folder_type, cam)
+        out_name = os.path.splitext(filename)[0] + ".png"
+        human_mask_path = os.path.join(human_mask_dir, out_name)
 
-    cams = ["CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT", "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
-
-    model = init_segmentor(args.config, args.checkpoint, device=args.device)
-    save_dir = args.save_root
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-    # Samples
-    for cam in tqdm(cams, f'Extracting Masks ...'):
-        cam_dir = os.path.join(args.data_root, "samples", cam)
-        for img_file in os.listdir(cam_dir):
-            img_path = os.path.join(cam_dir, img_file)
-        human_mask_dir = os.path.join(save_dir, "human/samples", cam)
+        # Skip if exists (logic moved inside worker to minimize communication)
+        # Note: Directory creation should be thread-safe or pre-created, 
+        # but os.makedirs(exist_ok=True) is generally safe.
         if not os.path.exists(human_mask_dir):
-            os.makedirs(human_mask_dir)
-        vehicle_mask_dir = os.path.join(save_dir, "vehicle/samples", cam)
-        if not os.path.exists(vehicle_mask_dir):
-            os.makedirs(vehicle_mask_dir)
+            try:
+                os.makedirs(human_mask_dir, exist_ok=True)
+            except FileExistsError:
+                pass
 
-        for filename in tqdm(os.listdir(cam_dir), f'Extracting Masks from {cam} ...'):
-            human_mask_path = os.path.join(human_mask_dir, filename[:-4]+".png")
-            vehicle_mask_path = os.path.join(vehicle_mask_dir, filename[:-4]+".png")
-            if args.ignore_existing and os.path.exists(human_mask_path) and os.path.exists(vehicle_mask_path):
-                continue
-            fpath = os.path.join(cam_dir, filename)
-            # ---- Inference and save outputs
-            result = inference_segmentor(model, fpath)
-            mask = result[0].astype(np.uint8)   # NOTE: in the settings of "cityscapes", there are 19 classes at most.
-            # save human masks
-            human_mask = np.isin(mask, dataset_classes_in_sematic['human'])
-            imageio.imwrite(human_mask_path, human_mask.astype(np.uint8)*255)
+        image = cv2.imread(img_path)
+        if image is None: continue
 
-            # save vehicle
-            vehicle_mask = np.isin(mask, dataset_classes_in_sematic['Vehicle'])
-            imageio.imwrite(vehicle_mask_path, vehicle_mask.astype(np.uint8)*255)
+        # Inference
+        image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        inputs = processor(images=image_rgb, return_tensors="pt").to(device)
 
-    # Sweeps
-    for cam in tqdm(cams, f"Extracting Masks ..."):
-        cam_dir = os.path.join(args.data_root, "sweeps", cam)
-        for img_file in os.listdir(cam_dir):
-            img_path = os.path.join(cam_dir, img_file)
-        human_mask_dir = os.path.join(save_dir, "human/sweeps", cam)
-        if not os.path.exists(human_mask_dir):
-            os.makedirs(human_mask_dir)
-        vehicle_mask_dir = os.path.join(save_dir, "vehicle/sweeps", cam)
-        if not os.path.exists(vehicle_mask_dir):
-            os.makedirs(vehicle_mask_dir)
-
-        for filename in tqdm(os.listdir(cam_dir), f"Extracting Masks from {cam} ..."):
-            human_mask_path = os.path.join(human_mask_dir, filename[:-4] + ".png")
-            vehicle_mask_path = os.path.join(vehicle_mask_dir, filename[:-4] + ".png")
-            if (
-                args.ignore_existing
-                and os.path.exists(human_mask_path)
-                and os.path.exists(vehicle_mask_path)
-            ):
-                continue
-            fpath = os.path.join(cam_dir, filename)
-            # ---- Inference and save outputs
-            result = inference_segmentor(model, fpath)
-            mask = result[0].astype(
-                np.uint8
-            )  # NOTE: in the settings of "cityscapes", there are 19 classes at most.
-            # save human masks
-            human_mask = np.isin(mask, dataset_classes_in_sematic["human"])
+        with torch.no_grad():
+            outputs = model(**inputs)
+            # Interpolate to original size
+            upsampled_logits = torch.nn.functional.interpolate(
+                outputs.logits,
+                size=image_rgb.shape[:2],
+                mode="bilinear",
+                align_corners=False,
+            )
+        
+        pred_seg = upsampled_logits.argmax(dim=1)[0].cpu().numpy()
+        
+        # Save Human Mask
+        human_mask = np.isin(pred_seg, DATASET_CLASSES['human'])
+        if np.any(human_mask):
             imageio.imwrite(human_mask_path, human_mask.astype(np.uint8) * 255)
 
-            # save vehicle
-            vehicle_mask = np.isin(mask, dataset_classes_in_sematic["Vehicle"])
-            imageio.imwrite(vehicle_mask_path, vehicle_mask.astype(np.uint8) * 255)
+def main():
+    parser = ArgumentParser()
+    parser.add_argument('--data_root', type=str, default='data/nuscenes')
+    parser.add_argument("--save_root", type=str, default='data/nuscenes_masks')
+    parser.add_argument('--gpus', type=str, default='0,1,2,3,4,5,6,7', help='Comma separated GPU IDs')
+    parser.add_argument('--ignore_existing', action='store_true')
+    args = parser.parse_args()
+
+    # 1. Parse GPUs
+    gpu_ids = [int(x) for x in args.gpus.split(',') if x.strip()]
+    n_gpus = len(gpu_ids)
+    print(f"Initializing extraction on {n_gpus} GPUs: {gpu_ids}")
+
+    # 2. Collect ALL files first (Main Thread)
+    print("Collecting file list... (this may take a moment)")
+    cams = ["CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT", "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"]
+    folder_types = ["samples", "sweeps"]
+    
+    all_tasks = []
+    
+    for folder_type in folder_types:
+        for cam in cams:
+            cam_dir = os.path.join(args.data_root, folder_type, cam)
+            if not os.path.exists(cam_dir): continue
+            
+            # Target dir check for "ignore_existing"
+            target_dir = os.path.join(args.save_root, "human", folder_type, cam)
+            
+            files = [f for f in os.listdir(cam_dir) if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
+            
+            for f in files:
+                if args.ignore_existing:
+                    tgt_path = os.path.join(target_dir, os.path.splitext(f)[0] + ".png")
+                    if os.path.exists(tgt_path):
+                        continue
+                
+                # Task: (folder_type, cam_name, filename)
+                all_tasks.append((folder_type, cam, f))
+
+    total_files = len(all_tasks)
+    print(f"Total files to process: {total_files}")
+    if total_files == 0:
+        print("Nothing to do.")
+        return
+
+    # 3. Split tasks into chunks
+    chunk_size = int(np.ceil(total_files / n_gpus))
+    chunks = [all_tasks[i:i + chunk_size] for i in range(0, total_files, chunk_size)]
+    
+    # Handle edge case where we have more GPUs than chunks
+    while len(chunks) < n_gpus:
+        chunks.append([])
+
+    # 4. Spawn Processes
+    mp.set_start_method('spawn', force=True)
+    processes = []
+    
+    for rank in range(n_gpus):
+        p = mp.Process(
+            target=process_chunk, 
+            args=(rank, gpu_ids, chunks[rank], args.save_root, args.data_root)
+        )
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()
+
+    print("\nMulti-GPU Extraction Complete.")
+
+if __name__ == "__main__":
+    main()
