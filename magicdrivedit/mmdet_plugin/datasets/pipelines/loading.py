@@ -123,13 +123,17 @@ class LoadMultiViewHumanMaskFromFiles:
         images = []
         h, w = 0, 0
         for name in filename:
-            images.append(
-                Image.open(
-                    name.replace("nuscenes", "nuscenes_masks/human").replace(
-                        ".jpg", ".png"
+            mask_name = name.replace("nuscenes", "nuscenes_masks/human").replace(".jpg", ".png")
+            if os.path.exists(mask_name):
+                images.append(
+                    Image.open(
+                        mask_name
                     )
                 )
-            )
+            else:
+                images.append(
+                    Image.new("L", (1600, 900), 0)
+                )
 
         # TODO: consider image padding in waymo
         results["human_mask"] = images
