@@ -143,7 +143,7 @@ model = dict(
     control_skip_cross_view=True,
     control_skip_temporal=False,  # CHANGED
     brushnet_skip_cross_attn=True,
-    use_lora_base_blocks=True,
+    use_lora_base_blocks=False,
     # load pretrained
     from_pretrained="outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251113-2359/epoch0-global_step5000/ema.pt",
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
