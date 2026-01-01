@@ -3,6 +3,8 @@ from copy import deepcopy
 
 import torch
 from tqdm import tqdm
+from einops import rearrange
+from structured_noise import generate_structured_noise_batch_vectorized
 
 from magicdrivedit.registry import SCHEDULERS
 from magicdrivedit.utils.inference_utils import replace_with_null_condition
@@ -346,6 +348,7 @@ class RFLOW_SDEBRUSHNET(RFLOW):
             noise_added = torch.zeros_like(mask, dtype=torch.bool)
             noise_added = noise_added | (mask == 1)
 
+        noise_inpaint_encoded = None
         progress_wrap = partial(tqdm, leave=False) if progress else (lambda x: x)
         for i, t in progress_wrap(enumerate(timesteps)):
             # mask for adding noise
@@ -365,7 +368,46 @@ class RFLOW_SDEBRUSHNET(RFLOW):
             # Create independent timestep for inpaint based on noise scale
             # t_inpaint represents the noise level to add to z_inpaint (independent of diffusion timestep t)
             t_inpaint = torch.tensor([inpaint_noise_scale * self.num_timesteps] * z.shape[0], device=device)
-            noise_inpaint_encoded = torch.randn_like(z)
+            if noise_inpaint_encoded is None:
+                # 1. Determine NC (Number of Cameras)
+                # z_inpaint shape is [B, (C * NC), T, H, W]
+                NC = z_inpaint.shape[1] // 3
+                
+                # 2. MANUALLY CALL THE ENCODER
+                # We access the submodule 'shallow_encoder' directly from the model instance.
+                # Reshape: B (C NC) T -> (B NC) C T
+                z_inpaint_reshaped = rearrange(z_inpaint, "B (C NC) T ... -> (B NC) C T ...", NC=NC).to(torch.bfloat16).to(device)
+                model.shallow_encoder = model.shallow_encoder.to(device)
+                with torch.no_grad():
+                     # This is the key line: We call the sub-component explicitly
+                     z_inpaint_encoded = model.shallow_encoder(z_inpaint_reshaped)
+
+                # 3. Generate Structured Noise (Same logic as before)
+                B_NC, C, T, H, W = z_inpaint_encoded.shape
+                x_flat = rearrange(z_inpaint_encoded, "b c t h w -> (b t) c h w")
+                
+                # ... (noise generation code: FFT/Vectorized logic) ...
+                # For brevity, assuming the function generate_structured_noise_batch_vectorized is available
+                input_noise = torch.randn_like(x_flat)
+                chunk_size = 4
+                structured_noise_list = []
+                for k in range(0, x_flat.shape[0], chunk_size):
+                    x_chunk = x_flat[k : k + chunk_size]
+                    noise_chunk = input_noise[k : k + chunk_size]
+                    
+                    out_chunk = generate_structured_noise_batch_vectorized(
+                        x_chunk,
+                        cutoff_radius=20.0, 
+                        transition_width=2.0,
+                        input_noise=noise_chunk,
+                    )
+                    structured_noise_list.append(out_chunk)
+                
+                structured_noise_flat = torch.cat(structured_noise_list, dim=0)
+                
+                # 4. Reshape back
+                noise_inpaint_encoded_struct = rearrange(structured_noise_flat, "(b t) c h w -> b c t h w", b=B_NC, t=T)
+                noise_inpaint_encoded = rearrange(noise_inpaint_encoded_struct, "(B NC) C T ... -> B (C NC) T ...", NC=NC)
 
             # classifier-free guidance
             z_in = torch.cat([z, z], 0)
@@ -706,6 +748,7 @@ class RFLOW_SDEBRUSHNET_SLICE(RFLOW_SDEBRUSHNET):
             noise_added = torch.zeros_like(mask, dtype=torch.bool)
             noise_added = noise_added | (mask == 1)
 
+        noise_inpaint_encoded = None
         progress_wrap = partial(tqdm, leave=False) if progress else (lambda x: x)
         original_model_device = model.device
         for i, t in progress_wrap(enumerate(timesteps)):
@@ -725,7 +768,46 @@ class RFLOW_SDEBRUSHNET_SLICE(RFLOW_SDEBRUSHNET):
             # Create independent timestep for inpaint based on noise scale
             # t_inpaint represents the noise level to add to z_inpaint (independent of diffusion timestep t)
             t_inpaint = torch.tensor([inpaint_noise_scale * self.num_timesteps] * z.shape[0], device=device)
-            noise_inpaint_encoded = torch.randn_like(z)
+            if noise_inpaint_encoded is None:
+                # 1. Determine NC (Number of Cameras)
+                # z_inpaint shape is [B, (C * NC), T, H, W]
+                NC = z_inpaint.shape[1] // 3 
+                
+                # 2. MANUALLY CALL THE ENCODER
+                # We access the submodule 'shallow_encoder' directly from the model instance.
+                # Reshape: B (C NC) T -> (B NC) C T
+                z_inpaint_reshaped = rearrange(z_inpaint, "B (C NC) T ... -> (B NC) C T ...", NC=NC).to(torch.bfloat16)
+                model.shallow_encoder = model.shallow_encoder.to(device)
+                with torch.no_grad():
+                    # This is the key line: We call the sub-component explicitly
+                    z_inpaint_encoded = model.shallow_encoder(z_inpaint_reshaped)
+
+                # 3. Generate Structured Noise (Same logic as before)
+                B_NC, C, T, H, W = z_inpaint_encoded.shape
+                x_flat = rearrange(z_inpaint_encoded, "b c t h w -> (b t) c h w")
+                
+                # ... (noise generation code: FFT/Vectorized logic) ...
+                # For brevity, assuming the function generate_structured_noise_batch_vectorized is available
+                input_noise = torch.randn_like(x_flat)
+                chunk_size = 4
+                structured_noise_list = []
+                for k in range(0, x_flat.shape[0], chunk_size):
+                    x_chunk = x_flat[k : k + chunk_size]
+                    noise_chunk = input_noise[k : k + chunk_size]
+                    
+                    out_chunk = generate_structured_noise_batch_vectorized(
+                        x_chunk,
+                        cutoff_radius=4.0, 
+                        transition_width=2.0,
+                        input_noise=noise_chunk,
+                    )
+                    structured_noise_list.append(out_chunk)
+                
+                structured_noise_flat = torch.cat(structured_noise_list, dim=0)
+                
+                # 4. Reshape back
+                noise_inpaint_encoded_struct = rearrange(structured_noise_flat, "(b t) c h w -> b c t h w", b=B_NC, t=T)
+                noise_inpaint_encoded = rearrange(noise_inpaint_encoded_struct, "(B NC) C T ... -> B (C NC) T ...", NC=NC)
 
             # 1. all cond
             _model_args = {k: v for k, v in model_args.items()}
