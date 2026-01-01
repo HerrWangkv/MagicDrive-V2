@@ -503,7 +503,7 @@ def main():
                     x = rearrange(x, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
                     human_mask = batch.pop("human_masks").to(device, dtype)
                     human_mask = rearrange(human_mask, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
-                    x_human = torch.where(human_mask > 0.5, x, torch.ones_like(x)) # white background ##TODO:save and check
+                    x_human = torch.where(human_mask > 0.5, x, torch.rand_like(x) * 2 - 1) # white background ##TODO:save and check
                     y = batch.pop("captions")[0]  # B, just take first frame
                     maps = batch.pop("bev_map_with_aux").to(device, dtype)  # B, T, C, H, W
                     bbox = batch.pop("bboxes_3d_data")
@@ -624,8 +624,13 @@ def main():
                 if verbose_mode:
                     logger.info(f"Start model forward step! step={step}")
                 # == diffusion loss computation ==
+                global_step = epoch * num_steps_per_epoch + step
                 with timers["diffusion"] as loss_t:
-                    loss_dict = scheduler.training_losses(model, x, x_human, human_mask, model_args, mask=mask)
+                    if global_step < 2000:
+                        t_inpaint = torch.zeros(x.shape[0], device=x.device)
+                    else:
+                        t_inpaint = None
+                    loss_dict = scheduler.training_losses(model, x, x_human, human_mask, model_args, mask=mask, t_inpaint=t_inpaint)
                 if record_time:
                     timer_list.append(loss_t)
                 # NOTE: backward needs all_reduce, we sychronize here!
@@ -664,7 +669,6 @@ def main():
                 with timers["reduce_loss"] as reduce_loss_t:
                     all_reduce_mean(loss)
                     running_loss += loss.item()
-                    global_step = epoch * num_steps_per_epoch + step
                     log_step += 1
                     acc_step += 1
                 if record_time:

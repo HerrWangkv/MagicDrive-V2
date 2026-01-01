@@ -2055,48 +2055,52 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
         # This makes x_inpaint_encoded have the same spatial dimensions as x
         x_inpaint_encoded = self.shallow_encoder(x_inpaint)
         if noise_inpaint_encoded is None:
-            # Use phase-preserving diffusion for noise generation
-            # We use the encoded x_inpaint as the structure guidance            
-            # x_inpaint_encoded is (B*NC, C, T, H, W)
-            # We need to process each frame independently or treat T as batch dim
-            B_NC, C, T, H, W = x_inpaint_encoded.shape
-            
-            # Reshape to (B*NC*T, C, H, W) for 2D processing
-            x_flat = rearrange(x_inpaint_encoded, "b c t h w -> (b t) c h w")
-            
-            # Generate structured noise
-            input_noise = torch.randn_like(x_flat).cpu().float()
-
-            r0 = 4.0
-            if self.training:
-                # r = r0 + r', r' ~ Exp(lambda), lambda = 0.1
-                r_prime = -torch.log(torch.rand(1)).item() / 0.1
-                cutoff_radius = r0 + r_prime
+            if (timestep_inpaint == 0).all():
+                # Placeholder
+                noise_inpaint_encoded = torch.zeros_like(x_inpaint_encoded)
             else:
-                cutoff_radius = r0
+                # Use phase-preserving diffusion for noise generation
+                # We use the encoded x_inpaint as the structure guidance            
+                # x_inpaint_encoded is (B*NC, C, T, H, W)
+                # We need to process each frame independently or treat T as batch dim
+                B_NC, C, T, H, W = x_inpaint_encoded.shape
+                
+                # Reshape to (B*NC*T, C, H, W) for 2D processing
+                x_flat = rearrange(x_inpaint_encoded, "b c t h w -> (b t) c h w")
+                
+                # Generate structured noise
+                input_noise = torch.randn_like(x_flat).cpu().float()
 
-            # Process in chunks to avoid OOM in quantile
-            chunk_size = 4
-            structured_noise_list = []
-            for i in range(0, x_flat.shape[0], chunk_size):
-                x_chunk = x_flat[i : i + chunk_size].cpu().float()
-                noise_chunk = input_noise[i : i + chunk_size]
+                r0 = 4.0
+                if self.training:
+                    # r = r0 + r', r' ~ Exp(lambda), lambda = 0.1
+                    r_prime = -torch.log(torch.rand(1)).item() / 0.1
+                    cutoff_radius = r0 + r_prime
+                else:
+                    cutoff_radius = r0
 
-                out_chunk = generate_structured_noise_batch_vectorized(
-                    x_chunk,
-                    cutoff_radius=cutoff_radius,
-                    transition_width=2.0,
-                    input_noise=noise_chunk,
+                # Process in chunks to avoid OOM in quantile
+                chunk_size = 4
+                structured_noise_list = []
+                for i in range(0, x_flat.shape[0], chunk_size):
+                    x_chunk = x_flat[i : i + chunk_size].cpu().float()
+                    noise_chunk = input_noise[i : i + chunk_size]
+
+                    out_chunk = generate_structured_noise_batch_vectorized(
+                        x_chunk,
+                        cutoff_radius=cutoff_radius,
+                        transition_width=2.0,
+                        input_noise=noise_chunk,
+                    )
+                    structured_noise_list.append(out_chunk)
+
+                structured_noise_flat = torch.cat(structured_noise_list, dim=0)
+                structured_noise_flat = structured_noise_flat.to(
+                    device=x_flat.device, dtype=x_flat.dtype
                 )
-                structured_noise_list.append(out_chunk)
-
-            structured_noise_flat = torch.cat(structured_noise_list, dim=0)
-            structured_noise_flat = structured_noise_flat.to(
-                device=x_flat.device, dtype=x_flat.dtype
-            )
-            
-            # Reshape back
-            noise_inpaint_encoded = rearrange(structured_noise_flat, "(b t) c h w -> b c t h w", b=B_NC, t=T)
+                
+                # Reshape back
+                noise_inpaint_encoded = rearrange(structured_noise_flat, "(b t) c h w -> b c t h w", b=B_NC, t=T)
             
         else:
             noise_inpaint_encoded = noise_inpaint_encoded.to(dtype)
