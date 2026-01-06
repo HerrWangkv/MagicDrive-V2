@@ -580,6 +580,7 @@ def main():
                 
                 # Get inpaint_noise_scale from config if available
                 inpaint_noise_scale = cfg.get("inpaint_noise_scale", None)
+                cutoff_radius = cfg.get("cutoff_radius", None)
                 
                 samples = scheduler.sample(
                     model,
@@ -594,6 +595,7 @@ def main():
                     progress=verbose >= 1,
                     mask=masks,
                     inpaint_noise_scale=inpaint_noise_scale,
+                    cutoff_radius=cutoff_radius,
                 )
                 
                 # Clean up after sampling

@@ -273,6 +273,7 @@ class RFLOW_SDEBRUSHNET(RFLOW):
         use_discrete_timesteps=False,
         use_timestep_transform=False,
         inpaint_noise_scale=0.0,
+        cutoff_radius=20.0,
         **kwargs,
     ):
         self.num_sampling_steps = num_sampling_steps
@@ -281,6 +282,7 @@ class RFLOW_SDEBRUSHNET(RFLOW):
         self.use_discrete_timesteps = use_discrete_timesteps
         self.use_timestep_transform = use_timestep_transform
         self.inpaint_noise_scale = inpaint_noise_scale
+        self.cutoff_radius = cutoff_radius
 
         self.scheduler = RFlowSchedulerSDEBrushNet(
             num_timesteps=num_timesteps,
@@ -304,6 +306,7 @@ class RFLOW_SDEBRUSHNET(RFLOW):
         mask=None,
         guidance_scale=None,
         inpaint_noise_scale=None,
+        cutoff_radius=None,
         progress=True,
     ):
         # if no specific guidance scale is provided, use the default scale when initializing the scheduler
@@ -313,6 +316,8 @@ class RFLOW_SDEBRUSHNET(RFLOW):
         # if no specific inpaint noise scale is provided, use the default scale when initializing the scheduler
         if inpaint_noise_scale is None:
             inpaint_noise_scale = self.inpaint_noise_scale
+        if cutoff_radius is None:
+            cutoff_radius = self.cutoff_radius
 
         n = len(prompts)
         # text encoding
@@ -389,7 +394,7 @@ class RFLOW_SDEBRUSHNET(RFLOW):
                 # ... (noise generation code: FFT/Vectorized logic) ...
                 # For brevity, assuming the function generate_structured_noise_batch_vectorized is available
                 input_noise = torch.randn_like(x_flat)
-                chunk_size = 4
+                chunk_size = NC
                 structured_noise_list = []
                 for k in range(0, x_flat.shape[0], chunk_size):
                     x_chunk = x_flat[k : k + chunk_size]
@@ -397,7 +402,7 @@ class RFLOW_SDEBRUSHNET(RFLOW):
                     
                     out_chunk = generate_structured_noise_batch_vectorized(
                         x_chunk,
-                        cutoff_radius=20.0, 
+                        cutoff_radius=cutoff_radius, 
                         transition_width=2.0,
                         input_noise=noise_chunk,
                     )
@@ -702,6 +707,7 @@ class RFLOW_SDEBRUSHNET_SLICE(RFLOW_SDEBRUSHNET):
         mask=None,
         guidance_scale=None,
         inpaint_noise_scale=None,
+        cutoff_radius=None,
         progress=True,
     ):
         # if no specific guidance scale is provided, use the default scale when initializing the scheduler
@@ -711,6 +717,8 @@ class RFLOW_SDEBRUSHNET_SLICE(RFLOW_SDEBRUSHNET):
         # if no specific inpaint noise scale is provided, use the default scale when initializing the scheduler
         if inpaint_noise_scale is None:
             inpaint_noise_scale = self.inpaint_noise_scale
+        if cutoff_radius is None:
+            cutoff_radius = self.cutoff_radius
 
         n = len(prompts)
         # text encoding
@@ -789,7 +797,7 @@ class RFLOW_SDEBRUSHNET_SLICE(RFLOW_SDEBRUSHNET):
                 # ... (noise generation code: FFT/Vectorized logic) ...
                 # For brevity, assuming the function generate_structured_noise_batch_vectorized is available
                 input_noise = torch.randn_like(x_flat)
-                chunk_size = 4
+                chunk_size = NC
                 structured_noise_list = []
                 for k in range(0, x_flat.shape[0], chunk_size):
                     x_chunk = x_flat[k : k + chunk_size]
@@ -797,7 +805,7 @@ class RFLOW_SDEBRUSHNET_SLICE(RFLOW_SDEBRUSHNET):
                     
                     out_chunk = generate_structured_noise_batch_vectorized(
                         x_chunk,
-                        cutoff_radius=4.0, 
+                        cutoff_radius=cutoff_radius, 
                         transition_width=2.0,
                         input_noise=noise_chunk,
                     )
