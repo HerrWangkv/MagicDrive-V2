@@ -2074,7 +2074,7 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
                 # Generate structured noise
                 input_noise = torch.randn_like(x_flat)
 
-                r0 = 4.0
+                r0 = min(H, W) // 4  # base cutoff radius
                 if self.training:
                     # r = r0 + r', r' ~ Exp(lambda), lambda = 0.1
                     u = torch.rand(B, device=x_flat.device)

@@ -291,7 +291,7 @@ class RFlowSchedulerSDEBrushNet(RFlowScheduler):
         # Sample independent timestep for x_inpaint
         if t_inpaint is None:
             t_inpaint = (
-                torch.rand((x_start.shape[0],), device=x_start.device)
+                torch.rand((x_start.shape[0],), device=x_start.device) ** 0.2
                 * self.num_timesteps
             )
             if self.use_timestep_transform:
