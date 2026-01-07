@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from copy import deepcopy
 from datetime import timedelta
 from pprint import pformat
+import gc
 
 sys.path.append(".")
 DEVICE_TYPE = os.environ.get("DEVICE_TYPE", "gpu")
@@ -503,7 +504,7 @@ def main():
                     x = rearrange(x, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
                     human_mask = batch.pop("human_masks").to(device, dtype)
                     human_mask = rearrange(human_mask, "B T NC C ... -> (B NC) C T ...")  # BxNC, C, T, H, W
-                    x_human = torch.where(human_mask > 0.5, x, torch.rand_like(x) * 2 - 1) # white background ##TODO:save and check
+                    x_human = torch.where(human_mask > 0.5, x, torch.ones_like(x)) # white background ##TODO:save and check
                     y = batch.pop("captions")[0]  # B, just take first frame
                     maps = batch.pop("bev_map_with_aux").to(device, dtype)  # B, T, C, H, W
                     bbox = batch.pop("bboxes_3d_data")
@@ -626,7 +627,7 @@ def main():
                 # == diffusion loss computation ==
                 global_step = epoch * num_steps_per_epoch + step
                 with timers["diffusion"] as loss_t:
-                    if global_step < 2000:
+                    if global_step < 0:
                         t_inpaint = torch.zeros(x.shape[0], device=x.device)
                     else:
                         t_inpaint = None
@@ -720,6 +721,12 @@ def main():
                         save_dir,
                     )
                     sub_dir_name = os.path.basename(save_dir)
+
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    if verbose_mode:
+                        logger.info("Forced memory cleanup after checkpoint save.")
 
                 report_every = cfg.get("report_every", 0)
                 if report_every > 0 and (global_step + 1) % report_every == 0:

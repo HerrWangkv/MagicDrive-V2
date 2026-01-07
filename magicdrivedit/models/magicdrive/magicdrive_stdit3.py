@@ -2068,27 +2068,32 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
                 # Reshape to (B*NC*T, C, H, W) for 2D processing
                 x_flat = rearrange(x_inpaint_encoded, "b c t h w -> (b t) c h w")
                 
+                # Reshape to (B*NC*T, C, H, W) for 2D processing
+                x_flat = rearrange(x_inpaint_encoded, "b c t h w -> (b t) c h w")
+                
                 # Generate structured noise
-                input_noise = torch.randn_like(x_flat).cpu().float()
+                input_noise = torch.randn_like(x_flat)
 
                 r0 = 4.0
                 if self.training:
                     # r = r0 + r', r' ~ Exp(lambda), lambda = 0.1
-                    r_prime = -torch.log(torch.rand(1)).item() / 0.1
-                    cutoff_radius = r0 + r_prime
+                    u = torch.rand(B, device=x_flat.device)
+                    cutoff_radius = r0 + (-torch.log(u) / 0.1)
                 else:
-                    cutoff_radius = r0
+                    cutoff_radius = torch.full((B,), r0, device=x_flat.device)
 
                 # Process in chunks to avoid OOM in quantile
-                chunk_size = 4
+                chunk_size = NC
+                frames_per_scene = NC * T
                 structured_noise_list = []
                 for i in range(0, x_flat.shape[0], chunk_size):
-                    x_chunk = x_flat[i : i + chunk_size].cpu().float()
+                    scene_idx = i // frames_per_scene
+                    x_chunk = x_flat[i : i + chunk_size]
                     noise_chunk = input_noise[i : i + chunk_size]
 
                     out_chunk = generate_structured_noise_batch_vectorized(
                         x_chunk,
-                        cutoff_radius=cutoff_radius,
+                        cutoff_radius=cutoff_radius[scene_idx].item(),
                         transition_width=2.0,
                         input_noise=noise_chunk,
                     )

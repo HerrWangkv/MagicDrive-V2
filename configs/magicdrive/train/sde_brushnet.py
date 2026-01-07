@@ -71,7 +71,7 @@ video_lengths_fps = {  # all lengths are 8n or 8n+1
         [1, 1, 1, 1],
     ],
 }
-balance_keywords = ["night", "rain", "none"]
+# balance_keywords = ["night", "rain", "none"]
 dataset_cfg_overrides = [
     (
         # key, value
@@ -90,7 +90,7 @@ dataset_cfg_overrides = [
         ("dataset.data.train.fps", video_lengths_fps["224x400"][1]),
         ("+dataset.data.train.micro_frame_size", micro_frame_size),
         ("+dataset.data.train.repeat_times", video_lengths_fps["224x400"][2]),
-        ("+dataset.data.train.balance_keywords", balance_keywords),
+        # ("+dataset.data.train.balance_keywords", balance_keywords),
         ("dataset.data.val.video_length", video_lengths_fps["224x400"][0]),
         ("dataset.data.val.fps", video_lengths_fps["224x400"][1]),
         ("+dataset.data.val.micro_frame_size", micro_frame_size),
@@ -110,7 +110,7 @@ dataset_cfg_overrides = [
         ("dataset.data.train.video_length", video_lengths_fps["424x800"][0]),
         ("dataset.data.train.fps", video_lengths_fps["424x800"][1]),
         ("+dataset.data.train.repeat_times", video_lengths_fps["424x800"][2]),
-        ("+dataset.data.train.balance_keywords", balance_keywords),
+        # ("+dataset.data.train.balance_keywords", balance_keywords),
         ("dataset.data.val.video_length", video_lengths_fps["424x800"][0]),
         ("dataset.data.val.fps", video_lengths_fps["424x800"][1]),
     ),
@@ -129,7 +129,7 @@ dataset_cfg_overrides = [
         ("dataset.data.train.video_length", video_lengths_fps["848x1600"][0]),
         ("dataset.data.train.fps", video_lengths_fps["848x1600"][1]),
         ("+dataset.data.train.repeat_times", video_lengths_fps["848x1600"][2]),
-        ("+dataset.data.train.balance_keywords", balance_keywords),
+        # ("+dataset.data.train.balance_keywords", balance_keywords),
         ("dataset.data.val.video_length", video_lengths_fps["848x1600"][0]),
         ("dataset.data.val.fps", video_lengths_fps["848x1600"][1]),
     ),
@@ -183,7 +183,7 @@ validation_index = [
     # "145-224-400-12-full",
     # "105-224-400-12-full",
     # "8726-848-1600-120-1",
-    "5543-424-800-12-33",  # know
+    "1234-424-800-12-33",  # know
     # "5543-848-1600-12-33",  # know
 ]
 validation_before_run = False  # just don't use it!
@@ -298,7 +298,7 @@ model = dict(
     # force_huggingface=True,  # if `from_pretrained` is a repo from hf, use this.
 )
 
-partial_load = "outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251102-0711/epoch0-global_step12000"
+partial_load = "weights/12000" #"./ckpts/MagicDriveDiT-stage3-40k-ft"
 
 
 vae = dict(
@@ -361,7 +361,7 @@ ckpt_every = 1000
 report_every = ckpt_every
 
 # optimization settings
-load = "outputs/MagicDriveSTDiT3-XL-2-SDEBrushNet_sde_brushnet_20251108-1358/epoch0-global_step4000"
+load = None
 grad_clip = 1.0
 lr = 2e-5
 ema_decay = 0.99
