@@ -355,6 +355,14 @@ def load_12hz_scenes(pkl_root, image_root, splits=['train', 'val']):
     print(f"Total: Populated {len(final_scenes)} scenes aligned with SDK.")
     return final_scenes
 
+def check_task_started(task, data_root, save_root):
+    """Check if at least one frame in the task has a generated mask."""
+    for path in task['frames']:
+        out_path = get_output_path(path, data_root, save_root)
+        if os.path.exists(out_path):
+            return True
+    return False
+
 def main():
     parser = ArgumentParser()
     parser.add_argument('--data_root', type=str, default='data/nuscenes')
@@ -432,11 +440,11 @@ def main():
             
             if not cam_paths: continue
 
-            # Check ignore_existing on last frame
-            if args.ignore_existing:
-                last_out = get_output_path(cam_paths[-1], args.data_root, args.save_root)
-                if os.path.exists(last_out):
-                    continue
+            # Previous simple check - replaced by heuristic below
+            # if args.ignore_existing:
+            #     last_out = get_output_path(cam_paths[-1], args.data_root, args.save_root)
+            #     if os.path.exists(last_out):
+            #         continue
             
             tasks.append({
                 'id': f"{scene_name}_{cam}",
@@ -445,6 +453,30 @@ def main():
             
     total_tasks = len(tasks)
     print(f"Total video sequences to process: {total_tasks}")
+    
+    if args.ignore_existing:
+        print("Applying skip heuristic...")
+        # Pre-check "started" status for performance
+        is_started = [check_task_started(t, args.data_root, args.save_root) for t in tqdm(tasks, desc="Checking status")]
+        
+        tasks_to_keep = []
+        for i in range(len(tasks)):
+            skipped = False
+            # Check heuristic: if this task started AND next task started, this task is done
+            if i + 1 < len(tasks):
+                 if is_started[i]:
+                     if is_started[i+1]:
+                         skipped = True
+                     else:
+                         print(f"Task {tasks[i]['id']} started but next task {tasks[i+1]['id']} not started. Rerunning.")
+            
+            if not skipped:
+                tasks_to_keep.append(tasks[i])
+
+        tasks = tasks_to_keep
+        total_tasks = len(tasks)
+        print(f"Tasks after filtering: {total_tasks}")
+
     
     if total_tasks == 0:
         print("No tasks found.")
