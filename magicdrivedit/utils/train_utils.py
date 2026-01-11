@@ -12,6 +12,7 @@ import torch.distributed as dist
 from einops import rearrange, repeat
 from colossalai.cluster import DistCoordinator, ProcessGroupMesh
 from colossalai.booster.plugin import LowLevelZeroPlugin
+from structured_noise import generate_structured_noise_batch_vectorized
 
 from magicdrivedit.acceleration.parallel_states import set_data_parallel_group, set_sequence_parallel_group, get_data_parallel_group, get_sequence_parallel_group
 from magicdrivedit.acceleration.plugin import ZeroSeqParallelPlugin
@@ -459,6 +460,231 @@ def run_validation(
     model.train()
     return video_save_dir
 
+@torch.no_grad()
+def run_unconditioned_ppd_validation(
+    val_cfg,
+    text_encoder,
+    vae,
+    model,
+    device,
+    dtype,
+    val_loader: torch.utils.data.DataLoader,
+    coordinator: DistCoordinator,
+    global_step: int,
+    exp_dir: str,
+    mv_order_map,
+    t_order_map,
+):
+    video_save_dir = os.path.join(exp_dir, f"validation-global_step{global_step}")
+    if coordinator.is_master():
+        os.makedirs(video_save_dir, exist_ok=True)
+    verbose = val_cfg.get("verbose", 1)
+    num_sample = val_cfg.get("num_sample", 2)
+    save_fps = val_cfg.save_fps
+
+    val_cfg.cpu_offload = val_cfg.get("cpu_offload", False)
+    if val_cfg.cpu_offload:
+        raise NotImplementedError()
+        text_encoder.t5.model.to("cpu")
+        model.to("cpu")
+        vae.to("cpu")
+        text_encoder.t5.model, model, vae, last_hook = enable_offload(
+            text_encoder.t5.model, model, vae, device
+        )
+
+    validation_scheduler = build_module(val_cfg.scheduler, SCHEDULERS)
+    text_encoder.y_embedder = (
+        model.module.y_embedder
+    )  # hack for classifier-free guidance
+    model.eval()
+
+    total_num = 0
+    for i, batch in enumerate(val_loader):
+        generator = torch.Generator("cpu").manual_seed(val_cfg.seed)
+        bl_generator = torch.Generator("cpu").manual_seed(val_cfg.seed)
+        B, T, NC = batch["pixel_values"].shape[:3]
+        latent_size = vae.get_latent_size((T, *batch["pixel_values"].shape[-2:]))
+
+        # == prepare batch prompts ==
+        y = batch.pop("captions")[0]  # B, just take first frame
+        # maps = batch.pop("bev_map_with_aux").to(device, dtype)  # B, T, C, H, W
+        # bbox = batch.pop("bboxes_3d_data")
+        # B len list (T, NC, len, 8, 3)
+        # bbox = [bbox_i.data for bbox_i in bbox]
+        # B, T, NC, len, 8, 3
+        # TODO: `bbox` may have some redundancy on `NC` dim.
+        # NOTE: we reshape the data later!
+        # bbox = collate_bboxes_to_maxlen(bbox, device, dtype, NC, T)
+        # B, T, NC, 3, 7
+        cams = batch.pop("camera_param").to(device, dtype)
+        cams = rearrange(cams, "B T NC ... -> (B NC) T 1 ...")  # BxNC, T, 1, 3, 7
+        rel_pos = batch.pop("frame_emb").to(device, dtype)
+        rel_pos = repeat(
+            rel_pos, "B T ... -> (B NC) T 1 ...", NC=NC
+        )  # BxNC, T, 1, 4, 4
+
+        # == model input format ==
+        model_args = {}
+        # model_args["maps"] = maps
+        # model_args["bbox"] = bbox
+        model_args["cams"] = cams
+        model_args["rel_pos"] = rel_pos
+        model_args["fps"] = batch.pop("fps")
+        model_args["height"] = batch.pop("height")
+        model_args["width"] = batch.pop("width")
+        model_args["num_frames"] = batch.pop("num_frames")
+        model_args = move_to(model_args, device=device, dtype=dtype)
+        # no need to move these
+        model_args["mv_order_map"] = mv_order_map
+        model_args["t_order_map"] = t_order_map
+
+        logging.info("start gather fps ...")
+        _fpss = gather_tensors(model_args["fps"], pg=get_data_parallel_group())
+        logging.info("end gather fps ...")
+        
+        x = batch.pop("pixel_values").to(device, dtype)
+        human_mask = batch.pop("human_masks").to(device, dtype)
+        x = torch.where(human_mask > 0.5, x, torch.ones_like(x))
+        breakpoint()
+        with torch.no_grad():
+            z0 = sp_vae(
+                rearrange(x, "B T NC C ... -> (B NC) C T ..."),
+                vae.encode,
+                get_sequence_parallel_group(),
+            )
+        H, W = z0.shape[-2:] 
+        for ns in range(num_sample):
+            z_flat = rearrange(
+                z0, "B C T ... -> (B T) C ...")
+            input_noise = torch.randn_like(z_flat)
+            chunk_size = NC
+            structured_noise_list = []
+            for i in range(0, z_flat.shape[0], chunk_size):
+                z_chunk = z_flat[i : i + chunk_size]
+                noise_chunk = input_noise[i : i + chunk_size]
+                with torch.no_grad():
+                    out_chunk = generate_structured_noise_batch_vectorized(
+                        z_chunk,
+                        cutoff_radius=min(H,W)//2,
+                        transition_width=2.0,
+                        input_noise=noise_chunk,
+                    )
+
+                structured_noise_list.append(out_chunk)
+            z = torch.cat(structured_noise_list, dim=0).to(device=device, dtype=dtype)
+            z = rearrange(z, "(B NC T) C ... -> B (C NC) T ...", B=B, NC=NC)
+            # == sample box ==
+            # if bbox is not None:
+            #     # null set values to all zeros, this should be safe
+            #     bbox = add_box_latent(
+            #         bbox,
+            #         B,
+            #         NC,
+            #         T,
+            #         partial(model.module.sample_box_latent, generator=bl_generator),
+            #     )
+            #     # overwrite!
+            #     new_bbox = {}
+            #     for k, v in bbox.items():
+            #         new_bbox[k] = rearrange(
+            #             v, "B T NC ... -> (B NC) T ..."
+            #         )  # BxNC, T, len, 3, 7
+            #     model_args["bbox"] = move_to(new_bbox, device=device, dtype=dtype)
+            # == add null condition ==
+            # y is handled by scheduler.sample
+            if (
+                val_cfg.scheduler.type == "dpm-solver"
+                and val_cfg.scheduler.cfg_scale == 1.0
+            ):
+                _model_args = copy.deepcopy(model_args)
+            else:
+                _model_args = add_null_condition(
+                    copy.deepcopy(model_args),
+                    model.module.camera_embedder.uncond_cam.to(device),
+                    model.module.frame_embedder.uncond_cam.to(device),
+                    prepend=(val_cfg.scheduler.type == "dpm-solver"),
+                )
+            # == inference ==
+            samples = validation_scheduler.sample(
+                model,
+                text_encoder,
+                z=z,
+                prompts=y,
+                device=device,
+                additional_args=_model_args,
+                progress=verbose >= 2 and coordinator.is_master(),
+                mask=None,
+            )
+            samples = rearrange(samples, "B (C NC) T ... -> (B NC) C T ...", NC=NC)
+            samples = vae.decode(samples.to(dtype), num_frames=T)
+            samples = rearrange(samples, "(B NC) C T ... -> B NC C T ...", NC=NC)
+            if val_cfg.cpu_offload:
+                last_hook.offload()
+            vid_samples = []
+            for sample in samples:
+                vid_samples.append(concat_6_views_pt(sample, oneline=False))
+            samples = torch.stack(vid_samples, dim=0)  # B, C, T, ...
+            del z, vid_samples
+            torch.cuda.empty_cache()
+
+            # gather sample from all processes
+            coordinator.block_all()
+            logging.info("start gather sample ...")
+            _samples = gather_tensors(samples, pg=get_data_parallel_group())
+            logging.info("end gather sample ...")
+
+            # == save samples ==
+            if coordinator.is_master():
+                video_clips = []
+                fpss = []
+                for sample, fps in zip(_samples, _fpss):  # list of B, C, T ...
+                    video_clips += [s.cpu() for s in sample]  # list of C, T ...
+                    fpss += [int(_fps) for _fps in fps]
+                for idx, video in enumerate(video_clips):
+                    save_path = os.path.join(
+                        video_save_dir, f"sample_{total_num + idx:04d}-{ns}"
+                    )
+                    save_path = save_sample(
+                        video,
+                        fps=save_fps if save_fps else fpss[idx],
+                        save_path=save_path,
+                        high_quality=True,
+                        verbose=verbose >= 2,
+                    )
+            del samples, _samples
+            coordinator.block_all()
+
+        # save_gt
+        x = rearrange(x, "B T NC C ... -> B NC C T ...")  # BxNC, C, T, H, W
+        torch.cuda.empty_cache()
+        logging.info("start gather gt ...")
+        _samples = gather_tensors(x, pg=get_data_parallel_group())
+        logging.info("end gather gt ...")
+        if coordinator.is_master():
+            samples = []
+            fpss = []
+            for sample, fps in zip(_samples, _fpss):
+                samples += [s.cpu() for s in sample]
+                fpss += [int(_fps) for _fps in fps]
+            for idx, sample in enumerate(samples):
+                vid_sample = concat_6_views_pt(sample, oneline=False)
+                save_path = save_sample(
+                    vid_sample,
+                    fps=save_fps if save_fps else fpss[idx],
+                    save_path=os.path.join(video_save_dir, f"gt_{total_num + idx:04d}"),
+                    high_quality=True,
+                    verbose=verbose >= 2,
+                )
+            total_num += len(samples)
+        del _samples, _fpss
+        torch.cuda.synchronize()
+        coordinator.block_all()
+
+    if val_cfg.cpu_offload:
+        # TODO: need to remove hooks
+        raise NotImplementedError()
+    model.train()
+    return video_save_dir
 
 def create_colossalai_plugin(plugin, dtype, grad_clip, sp_size, reduce_bucket_size_in_m: int = 20, overlap_allgather=False, verbose=False):
     if plugin == "zero2":

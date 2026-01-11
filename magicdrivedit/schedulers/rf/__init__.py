@@ -9,7 +9,7 @@ from structured_noise import generate_structured_noise_batch_vectorized
 from magicdrivedit.registry import SCHEDULERS
 from magicdrivedit.utils.inference_utils import replace_with_null_condition
 
-from .rectified_flow import RFlowScheduler, RFlowSchedulerBrushNet, RFlowSchedulerSDEBrushNet, timestep_transform
+from .rectified_flow import RFlowScheduler, RFlowSchedulerPPD, RFlowSchedulerBrushNet, RFlowSchedulerSDEBrushNet, timestep_transform
 
 
 @SCHEDULERS.register_module("rflow")
@@ -120,6 +120,31 @@ class RFLOW:
         return self.scheduler.training_losses(model, x_start, model_kwargs, noise, mask, weights, t)
 
 
+@SCHEDULERS.register_module("rflow-ppd")
+class RFLOW_PPD(RFLOW):
+    def __init__(
+        self,
+        num_sampling_steps=10,
+        num_timesteps=1000,
+        cfg_scale=4.0,
+        use_discrete_timesteps=False,
+        use_timestep_transform=False,
+        **kwargs,
+    ):
+        self.num_sampling_steps = num_sampling_steps
+        self.num_timesteps = num_timesteps
+        self.cfg_scale = cfg_scale
+        self.use_discrete_timesteps = use_discrete_timesteps
+        self.use_timestep_transform = use_timestep_transform
+
+        self.scheduler = RFlowSchedulerPPD(
+            num_timesteps=num_timesteps,
+            num_sampling_steps=num_sampling_steps,
+            use_discrete_timesteps=use_discrete_timesteps,
+            use_timestep_transform=use_timestep_transform,
+            **kwargs,
+        )
+        ## TODO: sample and training losses
 @SCHEDULERS.register_module("rflow-brushnet")
 class RFLOW_BRUSHNET(RFLOW):
     def __init__(

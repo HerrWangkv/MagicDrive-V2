@@ -4,6 +4,7 @@ import logging
 import torch
 from torch.distributions import LogisticNormal
 from einops import rearrange
+from structured_noise import generate_structured_noise_batch_vectorized
 
 # some code are inspired by https://github.com/magic-research/piecewise-rectified-flow/blob/main/scripts/train_perflow.py
 # and https://github.com/magic-research/piecewise-rectified-flow/blob/main/src/scheduler_perflow.py
@@ -173,7 +174,83 @@ class RFlowScheduler:
 
         return timepoints * original_samples + (1 - timepoints) * noise
 
+class RFlowSchedulerPPD(RFlowScheduler):
+    
+    def training_losses(self, model, x_start, model_kwargs=None, noise=None, mask=None, weights=None, t=None):
+        """
+        Compute training losses for a single timestep.
+        Arguments format copied from magicdrivedit/schedulers/iddpm/gaussian_diffusion.py/training_losses
+        Note: t is int tensor and should be rescaled from [0, num_timesteps-1] to [1,0]
+        """
+        if t is None:
+            if self.use_discrete_timesteps:
+                t = torch.randint(0, self.num_timesteps, (x_start.shape[0],), device=x_start.device)
+            elif self.sample_method == "uniform":
+                t = torch.rand((x_start.shape[0],), device=x_start.device) * self.num_timesteps
+            elif self.sample_method == "logit-normal":
+                t = self.sample_t(x_start) * self.num_timesteps
 
+            if self.use_timestep_transform:
+                t = timestep_transform(t, model_kwargs, scale=self.transform_scale, num_timesteps=self.num_timesteps, cog_style=self.cog_style_trans)
+
+        if model_kwargs is None:
+            model_kwargs = {}
+        if noise is None:
+            B, NC_C, T, H, W = x_start.shape
+            # Reshape to (B*NC*T, C, H, W) for 2D processing
+            x_flat = rearrange(x_start, "b (c nc) t h w -> (b nc t) c h w", nc = 6)# TODO: hard-coded nc=6
+            input_noise = torch.randn_like(x_flat)
+            r0 = min(H, W) // 4
+            u = torch.rand(B, device=x_flat.device)
+            cutoff_radius = r0 + (-torch.log(u) / 0.1)
+            chunk_size = 6
+            frames_per_scene = chunk_size * T
+            structured_noise_list = []
+            for i in range(0, x_flat.shape[0], chunk_size):
+                scene_idx = i // frames_per_scene
+                x_chunk = x_flat[i : i + chunk_size]
+                
+                noise_chunk = input_noise[i : i + chunk_size]
+                out_chunk = generate_structured_noise_batch_vectorized(
+                    x_chunk,
+                    cutoff_radius=cutoff_radius[scene_idx].item(),
+                    transition_width=2.0,
+                    input_noise=noise_chunk,
+                )
+                structured_noise_list.append(out_chunk)
+
+                structured_noise_flat = torch.cat(structured_noise_list, dim=0)
+                structured_noise_flat = structured_noise_flat.to(
+                    device=x_flat.device, dtype=x_flat.dtype
+                )
+            noise = rearrange(
+                structured_noise_flat,
+                "(b nc t) c h w -> b (c nc) t h w",
+                b=B,
+                nc=6,
+                t=T,
+            )
+        assert noise.shape == x_start.shape
+
+        x_t = self.add_noise(x_start, noise, t)
+        if mask is not None:
+            t0 = torch.zeros_like(t)
+            x_t0 = self.add_noise(x_start, noise, t0)
+            x_t = torch.where(mask[:, None, :, None, None], x_t, x_t0)
+
+        terms = {}
+        model_output = model(x_t, t, **model_kwargs)
+        if model_output.shape[1] == 2 * x_t.shape[1]:
+            model_output = model_output.chunk(2, dim=1)[0]
+        velocity_pred = model_output
+        if weights is None:
+            loss = mean_flat((velocity_pred - (x_start - noise)).pow(2), mask=mask)
+        else:
+            weight = _extract_into_tensor(weights, t, x_start.shape)
+            loss = mean_flat(weight * (velocity_pred - (x_start - noise)).pow(2), mask=mask)
+        terms["loss"] = loss
+
+        return terms
 class RFlowSchedulerBrushNet(RFlowScheduler):
 
     def training_losses(

@@ -1243,7 +1243,545 @@ class MagicDriveSTDiT3(PreTrainedModel):
         x = x[:, :, :R_t, :R_h, :R_w]
         return x
 
+class MagicDriveSTDiT3Unconditioned(MagicDriveSTDiT3):
+    def __init__(self, config):
+        PreTrainedModel.__init__(self, config)
+        
+        self.pred_sigma = config.pred_sigma
+        self.in_channels = config.in_channels
+        self.out_channels = config.in_channels * 2 if config.pred_sigma else config.in_channels
 
+        # model size related
+        self.depth = config.depth
+        # self.control_depth = config.control_depth
+        self.mlp_ratio = config.mlp_ratio
+        self.hidden_size = config.hidden_size
+        self.num_heads = config.num_heads
+
+        # computation related
+        self.enable_flash_attn = config.enable_flash_attn
+        self.enable_xformers = config.enable_xformers
+        self.enable_layernorm_kernel = config.enable_layernorm_kernel
+        self.enable_sequence_parallelism = config.enable_sequence_parallelism
+        self.sequence_parallelism_temporal = config.sequence_parallelism_temporal
+
+        # input size related
+        self.patch_size = config.patch_size
+        self.input_sq_size = config.input_sq_size
+        self.pos_embed = PositionEmbedding2D(self.hidden_size)
+        self.rope = RotaryEmbedding(dim=self.hidden_size // self.num_heads)
+        self.force_pad_h_for_sp_size = config.force_pad_h_for_sp_size
+        self.simu_sp_size = config.simulate_sp_size
+
+        # embedding
+        self.x_embedder = PatchEmbed3D(self.patch_size, self.in_channels, self.hidden_size)
+        self.t_embedder = TimestepEmbedder(self.hidden_size)
+        self.t_block = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(self.hidden_size, 6 * self.hidden_size, bias=True))
+        self.y_embedder = CaptionEmbedder(
+            in_channels=config.caption_channels,
+            hidden_size=config.hidden_size,
+            uncond_prob=config.class_dropout_prob,
+            act_layer=approx_gelu,
+            token_num=config.model_max_length,
+        )
+        self.fps_embedder = SizeEmbedder(self.hidden_size)
+
+        # if config.use_x_control_embedder:
+        #     self.x_control_embedder = PatchEmbed3D(self.patch_size, self.in_channels, self.hidden_size)
+        # else:
+        #     self.x_control_embedder = None
+        # base_token, should not be trainable
+        self.register_buffer("base_token", torch.randn(self.hidden_size))
+        # init camera encoder
+        self.camera_embedder = load_module(config.cam_encoder_cls)(
+            out_dim=config.hidden_size, **config.cam_encoder_param)
+        # init frame encoder
+        self.frame_embedder = load_module(config.frame_emb_cls)(
+            out_dim=config.hidden_size, **config.frame_emb_param)
+        # init bbox encoder
+        # self.bbox_embedder = load_module(config.bbox_embedder_cls)(
+        #     **config.bbox_embedder_param)
+        # init map 2D encoder
+        # self.controlnet_cond_embedder = load_module(config.map_embedder_cls)(
+        #     conditioning_embedding_channels=self.hidden_size // 2,
+        #     **config.map_embedder_param,
+        # )
+        # self.micro_frame_size = config.micro_frame_size  # should be the same as vae
+        # self.controlnet_cond_embedder_temp = MapControlTempEmbedding(
+        #     self.hidden_size, config.map_embedder_downsample_rate)
+        # self.controlnet_cond_patchifier = PatchEmbed3D(self.patch_size, self.hidden_size, self.hidden_size)
+
+        # base blocks
+        drop_path = [x.item() for x in torch.linspace(0, config.drop_path, self.depth)]
+        self.base_blocks_s = nn.ModuleList(
+            [
+                MultiViewSTDiT3Block(
+                    hidden_size=self.hidden_size,
+                    num_heads=self.num_heads,
+                    mlp_ratio=self.mlp_ratio,
+                    drop_path=drop_path[i],
+                    enable_flash_attn=self.enable_flash_attn,
+                    enable_xformers=self.enable_xformers,
+                    enable_layernorm_kernel=self.enable_layernorm_kernel,
+                    enable_sequence_parallelism=self.enable_sequence_parallelism,
+                    sequence_parallelism_temporal=self.sequence_parallelism_temporal,
+                    # stdit3
+                    qk_norm=config.qk_norm,
+                    # multiview params
+                    use_st_cross_attn=config.use_st_cross_attn,
+                    # skip_cross_view=True,  # just for debug
+                )
+                for i in range(self.depth)
+            ]
+        )
+        if config.with_temp_block:
+            self.base_blocks_t = nn.ModuleList(
+                [
+                    MultiViewSTDiT3Block(
+                        hidden_size=self.hidden_size,
+                        num_heads=self.num_heads,
+                        mlp_ratio=self.mlp_ratio,
+                        drop_path=drop_path[i],
+                        enable_flash_attn=self.enable_flash_attn,
+                        enable_xformers=self.enable_xformers,
+                        enable_layernorm_kernel=self.enable_layernorm_kernel,
+                        enable_sequence_parallelism=self.enable_sequence_parallelism,
+                        sequence_parallelism_temporal=self.sequence_parallelism_temporal,
+                        # stdit3
+                        qk_norm=config.qk_norm,
+                        temporal=True,
+                        rope=self.rope.rotate_queries_or_keys,
+                    )
+                    for i in range(self.depth)
+                ]
+            )
+        else:
+            self.base_blocks_t = None
+
+        # control blocks
+        # self.before_proj = zero_module(nn.Linear(self.hidden_size, self.hidden_size))
+        # drop_path = [x.item() for x in torch.linspace(0, config.drop_path, self.control_depth)]
+        # self.control_blocks_s = nn.ModuleList(
+        #     [
+        #         MultiViewSTDiT3Block(
+        #             hidden_size=self.hidden_size,
+        #             num_heads=self.num_heads,
+        #             mlp_ratio=self.mlp_ratio,
+        #             drop_path=drop_path[i],
+        #             enable_flash_attn=self.enable_flash_attn,
+        #             enable_xformers=self.enable_xformers,
+        #             enable_layernorm_kernel=self.enable_layernorm_kernel,
+        #             enable_sequence_parallelism=self.enable_sequence_parallelism,
+        #             sequence_parallelism_temporal=self.sequence_parallelism_temporal,
+        #             # stdit3
+        #             qk_norm=config.qk_norm,
+        #             # multiview params
+        #             is_control_block=True,
+        #             use_st_cross_attn=config.use_st_cross_attn,
+        #             skip_cross_view=config.control_skip_cross_view,
+        #         )
+        #         for i in range(self.control_depth)
+        #     ]
+        # )
+        # if config.control_skip_temporal:
+        #     self.control_blocks_t = None
+        # else:
+        #     self.control_blocks_t = nn.ModuleList(
+        #         [
+        #             MultiViewSTDiT3Block(
+        #                 hidden_size=self.hidden_size,
+        #                 num_heads=self.num_heads,
+        #                 mlp_ratio=self.mlp_ratio,
+        #                 drop_path=drop_path[i],
+        #                 enable_flash_attn=self.enable_flash_attn,
+        #                 enable_xformers=self.enable_xformers,
+        #                 enable_layernorm_kernel=self.enable_layernorm_kernel,
+        #                 enable_sequence_parallelism=self.enable_sequence_parallelism,
+        #                 sequence_parallelism_temporal=self.sequence_parallelism_temporal,
+        #                 # stdit3
+        #                 qk_norm=config.qk_norm,
+        #                 temporal=True,
+        #                 rope=self.rope.rotate_queries_or_keys,
+        #                 # multiview params
+        #                 is_control_block=True,
+        #             )
+        #             for i in range(self.control_depth)
+        #         ]
+        #     )
+
+        # final layer
+        self.final_layer = T2IFinalLayer(self.hidden_size, np.prod(self.patch_size), self.out_channels)
+
+        self.initialize_weights()
+
+        # set training status
+        if config.freeze_y_embedder:
+            for param in self.y_embedder.parameters():
+                param.requires_grad = False
+        if config.freeze_x_embedder:
+            for param in self.x_embedder.parameters():
+                param.requires_grad = False
+        if config.freeze_old_embedder:
+            for param in self.t_embedder.parameters():
+                param.requires_grad = False
+            for param in self.t_block.parameters():
+                param.requires_grad = False
+            for param in self.fps_embedder.parameters():
+                param.requires_grad = False
+        if config.freeze_temporal_blocks:
+            for block in self.base_blocks_t:
+                # freeze all
+                for param in block.parameters():
+                    param.requires_grad = False
+                # but train cross_attn! NOTE: we may not need this.
+                # for param in block.cross_attn.parameters():
+                #     param.requires_grad = True
+
+            # if self.control_blocks_t is not None:
+            #     for block in self.control_blocks_t:
+            #         for param in block.parameters():
+            #             param.requires_grad = False
+                    # for param in block.cross_attn.parameters():
+                    #     param.requires_grad = True
+
+        # from magicdrive to video
+        if config.only_train_temp_blocks:
+            if not config.only_train_base_blocks:
+                logging.warning("`only_train_temp_blocks` is only usable with `only_train_base_blocks`.")
+        if config.only_train_base_blocks:
+            # first freeze all
+            for param in self.parameters():
+                param.requires_grad = False
+
+            # then open some
+            if not config.only_train_temp_blocks:
+                for param in self.base_blocks_s.parameters():
+                    param.requires_grad = True
+            if self.base_blocks_t is not None:
+                for param in self.base_blocks_t.parameters():
+                    param.requires_grad = True
+
+            # if self.control_blocks_t is not None:
+            #     for param in self.control_blocks_t.parameters():
+            #         param.requires_grad = True
+
+            # embedders
+            # NOTE: embedder changed, do we need to change cross-attn in control
+            # blocks?
+            for mod in [
+                # self.camera_embedder,
+                self.frame_embedder,
+                # self.bbox_embedder,
+                # self.controlnet_cond_embedder,
+                # self.controlnet_cond_embedder_temp,
+                # self.controlnet_cond_patchifier,
+                # self.before_proj,
+                # self.x_control_embedder,
+            ]:
+                if mod is None:
+                    continue
+                for param in mod.parameters():
+                    param.requires_grad = True
+
+            assert config.zero_and_train_embedder is None
+            assert not config.qk_norm_trainable
+            assert not config.freeze_old_params
+            return # ignore all others
+
+        if config.freeze_old_params:
+            for param in self.parameters():
+                param.requires_grad = False
+
+        # from pretrain to magicdrive control
+        if config.zero_and_train_embedder is not None:
+            for emb in config.zero_and_train_embedder:
+                zero_module(getattr(self, emb).mlp[-1])
+                for param in getattr(self, emb).parameters():
+                    param.requires_grad = True
+
+        if config.qk_norm_trainable:
+            for name, param in self.named_parameters():
+                if "q_norm" in name or "k_norm" in name:
+                    logging.info(f"set {name} to trainable")
+                    param.requires_grad = True
+
+        # make sure all new parameters require grad
+        # cross view attn
+        for block in self.base_blocks_s:
+            if hasattr(block, "cross_view_attn"):
+                for param in block.norm3.parameters():
+                    param.requires_grad = True
+                for param in block.cross_view_attn.parameters():
+                    param.requires_grad = True
+                for param in block.mva_proj.parameters():
+                    param.requires_grad = True
+                block.scale_shift_table_mva.requires_grad = True
+
+        # control blocks
+        # for param in self.control_blocks_s.parameters():
+        #     param.requires_grad = True
+        # if self.control_blocks_t is not None:
+        #     for param in self.control_blocks_t.parameters():
+        #         param.requires_grad = True
+
+        # embedders
+        for mod in [
+            self.camera_embedder,
+            self.frame_embedder,
+            # self.bbox_embedder,
+            # self.controlnet_cond_embedder,
+            # self.controlnet_cond_embedder_temp,
+            # self.controlnet_cond_patchifier,
+            # self.before_proj,
+            # self.x_control_embedder,
+        ]:
+            if mod is None:
+                continue
+            for param in mod.parameters():
+                param.requires_grad = True
+
+    def initialize_weights(self):
+        # Initialize transformer layers:
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        self.apply(_basic_init)
+
+        # NOTE: some proj layers are zero-initialized on creating.
+        def _zero_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.constant_(module.weight, 0)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        # new block in base
+        for block in self.base_blocks_s:
+            _zero_init(block.mva_proj)
+            assert block.after_proj == None
+
+        if self.base_blocks_t is not None:
+            for block in self.base_blocks_t:
+                assert block.mva_proj == None
+                assert block.after_proj == None
+                # Initialize temporal blocks
+                _zero_init(block.attn.proj)
+                _zero_init(block.cross_attn.proj)
+                _zero_init(block.mlp.fc2.weight)
+            logging.info("Your base_blocks_t uses zero init!")
+
+        # control block
+        # for block in self.control_blocks_s:
+        #     _zero_init(block.mva_proj)
+        #     _zero_init(block.after_proj)
+        # if self.control_blocks_t is not None:
+        #     for block in self.control_blocks_t:
+        #         assert block.mva_proj == None
+        #         _zero_init(block.after_proj)
+
+        # self
+        # _zero_init(self.before_proj)
+
+        # zero init embedder proj
+        # _zero_init(self.bbox_embedder.final_proj)
+        _zero_init(self.camera_embedder.after_proj)
+        _zero_init(self.frame_embedder.final_proj)
+
+        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d): cr. PixArt
+        # w = self.controlnet_cond_patchifier.proj.weight.data
+        # nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+
+        # Initialize caption embedding MLP: cr. PixArt
+        # nn.init.normal_(self.bbox_embedder.mlp.fc1.weight, std=0.02)
+        # nn.init.normal_(self.bbox_embedder.mlp.fc2.weight, std=0.02)
+        nn.init.normal_(self.frame_embedder.mlp.fc1.weight, std=0.02)
+        nn.init.normal_(self.frame_embedder.mlp.fc2.weight, std=0.02)
+        nn.init.normal_(self.camera_embedder.emb2token.weight, std=0.02)
+
+    def prepare_text_embedding(self, text_encoder):
+        @torch.no_grad()
+        def text_to_embedding(text):
+            ret = text_encoder.encode(text)
+            hidden_state, _ = self.encode_text(ret['y'], mask=None)
+            return hidden_state[:, :int(ret['mask'].sum(dim=1))]
+        _training = self.training
+        self.training = False
+        # self.bbox_embedder.prepare(text_to_embedding)
+        self.base_token[:] = text_to_embedding("").squeeze()
+        self.training = _training
+
+    def forward(self, x, timestep, y, cams, rel_pos, fps,
+                height, width, drop_cond_mask=None, drop_frame_mask=None,
+                mv_order_map=None, t_order_map=None, mask=None, x_mask=None,
+                **kwargs):
+        """
+        Forward pass of MagicDrive.
+        """
+        dtype = self.x_embedder.proj.weight.dtype
+        B, real_T = x.size(0), rel_pos.size(1)
+        if drop_cond_mask is None:  # camera
+            drop_cond_mask = torch.ones((B), device=x.device, dtype=x.dtype)
+        if drop_frame_mask is None:  # box & rel_pos
+            drop_frame_mask = torch.ones((B, real_T), device=x.device, dtype=x.dtype)
+        if False:
+            # if mv_order_map is None:
+            NC = 1
+        else:
+            NC = len(mv_order_map)
+        x = x.to(dtype)
+        # HACK: to use scheduler, we never assume NC with C
+        x = rearrange(x, "B (C NC) T ... -> (B NC) C T ...", NC=NC)
+        timestep = timestep.to(dtype)
+        y = y.to(dtype)
+
+        # === get pos embed ===
+        _, _, Tx, Hx, Wx = x.size()
+        x_in_shape = x.shape  # before pad
+        T, H, W = self.get_dynamic_size(x)
+        S = H * W
+
+        # adjust for sequence parallelism
+        # we need to ensure H * W is divisible by sequence parallel size
+        # for simplicity, we can adjust the height to make it divisible
+        h_pad_size = 0
+        if self.training:
+            _simu_sp_size = self.simu_sp_size
+        else:
+            if len(self.simu_sp_size) > 0:
+                warn_once(f"We will ignore `simu_sp_size` if not training.")
+            _simu_sp_size = []
+        if self.force_pad_h_for_sp_size is not None:
+            if S % self.force_pad_h_for_sp_size != 0:
+                h_pad_size = self.force_pad_h_for_sp_size - H % self.force_pad_h_for_sp_size
+                warn_once(
+                    f"Your input shape {x.shape} was rounded into {(T, H, W)}. "
+                    f"With force_pad_h_for_sp_size={self.force_pad_h_for_sp_size}, "
+                    f"it is padded by H with {h_pad_size}. "
+                )
+        elif len(_simu_sp_size) > 0:
+            if self.enable_sequence_parallelism and not self.sequence_parallelism_temporal:
+                # make sure the simulated is greater than real sp_size
+                sp_size = dist.get_world_size(get_sequence_parallel_group())
+                possible_sp_size = []
+                for _sp_size in _simu_sp_size:
+                    if _sp_size >= sp_size:
+                        possible_sp_size.append(_sp_size)
+            else:
+                possible_sp_size = _simu_sp_size
+            # random pick one
+            simu_sp_size = random.choice(possible_sp_size)
+            if S % simu_sp_size != 0:
+                h_pad_size = simu_sp_size - H % simu_sp_size
+            if h_pad_size > 0:
+                warn_once(
+                    f"Your input shape {x.shape} was rounded into {(T, H, W)}. "
+                    f"For simu_sp_size={simu_sp_size} out of {possible_sp_size}, "
+                    f"it is padded by H with {h_pad_size}. "
+                    "Please pay attention to potential mismatch between w/ and w/o sp."
+                )
+        elif self.enable_sequence_parallelism and not self.sequence_parallelism_temporal:
+            sp_size = dist.get_world_size(get_sequence_parallel_group())
+            if S % sp_size != 0:
+                h_pad_size = sp_size - H % sp_size
+            if h_pad_size > 0:
+                warn_once(
+                    f"Your input shape {x.shape} was rounded into {(T, H, W)}. "
+                    f"For sp_size={sp_size}, it is padded by H with {h_pad_size}. "
+                    "Please pay attention to potential mismatch between w/ and w/o sp."
+                )
+
+        if h_pad_size > 0:
+            # pad x along the H dimension
+            hx_pad_size = h_pad_size * self.patch_size[1]
+            x = F.pad(x, (0, 0, 0, hx_pad_size))
+            # adjust parameters
+            H += h_pad_size
+            S = H * W
+            if self.enable_sequence_parallelism and not self.sequence_parallelism_temporal:
+                sp_size = dist.get_world_size(get_sequence_parallel_group())
+                assert S % sp_size == 0, f"S={S} should be divisible by {sp_size}!"
+
+        base_size = round(S**0.5)
+        resolution_sq = (height[0].item() * width[0].item()) ** 0.5
+        scale = resolution_sq / self.input_sq_size
+        pos_emb = self.pos_embed(x, H, W, scale=scale, base_size=base_size)
+
+        # === get timestep embed ===
+        t = self.t_embedder(timestep, dtype=x.dtype)  # [B, C]
+        fps = self.fps_embedder(fps.unsqueeze(1), B)
+        t = t + fps
+        t_mlp = self.t_block(t)
+        t0 = t0_mlp = None
+        if x_mask is not None:
+            t0_timestep = torch.zeros_like(timestep)
+            t0 = self.t_embedder(t0_timestep, dtype=x.dtype)
+            t0 = t0 + fps
+            t0_mlp = self.t_block(t0)
+
+        # === get y embed ===
+        # we need to remove the T dim in y
+        # rel_pos & bbox: T -> 1
+        # cam: just take first frame
+        y, y_lens = self.encode_cond_sequence(
+            None, cams, rel_pos, y, mask, drop_cond_mask, drop_frame_mask)  # (B, L, D)
+        if y.shape[1] != T and y.shape[1] > 1:
+            warn_once(f"Got y length {y.shape[1]}, will interpolate to {T}.")
+            seq_len = y.shape[2]
+            y = rearrange(y, "B T L D -> B (L D) T")
+            y = F.interpolate(y, T)
+            y = rearrange(y, "B (L D) T -> B T L D", L=seq_len)
+
+        # === get x embed ===
+        x_b = self.x_embedder(x)  # [B, N, C]
+        x_b = rearrange(x_b, "B (T S) C -> B T S C", T=T, S=S)
+        x_b = x_b + pos_emb
+
+        x = x_b
+
+        # shard over the sequence dim if sp is enabled
+        if self.enable_sequence_parallelism:
+            assert not self.sequence_parallelism_temporal, "not support!"
+            x = split_forward_gather_backward(x, get_sequence_parallel_group(), dim=2, grad_scale="down")
+            S = S // dist.get_world_size(get_sequence_parallel_group())
+
+        # c = torch.randn_like(x)  # change me!
+        x = rearrange(x, "B T S C -> B (T S) C", T=T, S=S)
+
+        # === blocks ===
+        if x_mask is not None:
+            x_mask = repeat(x_mask, "b ... -> (b NC) ...", NC=NC)
+        for block_i in range(0, self.depth):
+            x = auto_grad_checkpoint(
+                self.base_blocks_s[block_i],
+                x, y, t_mlp, y_lens, x_mask, t0_mlp, T, S, NC, mv_order_map, t_order_map)
+            if self.base_blocks_t is not None:
+                x = auto_grad_checkpoint(
+                    self.base_blocks_t[block_i],
+                    x, y, t_mlp, y_lens, x_mask, t0_mlp, T, S, NC, mv_order_map, t_order_map)
+
+        if self.enable_sequence_parallelism:
+            x = rearrange(x, "B (T S) C -> B T S C", T=T, S=S)
+            x = gather_forward_split_backward(x, get_sequence_parallel_group(), dim=2, grad_scale="up")
+            S = S * dist.get_world_size(get_sequence_parallel_group())
+            x = rearrange(x, "B T S C -> B (T S) C", T=T, S=S)
+
+        # === final layer ===
+        x = self.final_layer(
+            x, repeat(t, "b d -> (b NC) d", NC=NC),
+            x_mask, repeat(t0, "b d -> (b NC) d", NC=NC) if t0 is not None else None,
+            T, S,
+        )
+        x = self.unpatchify(x, T, H, W, Tx, Hx, Wx)
+
+        # cast to float32 for better accuracy
+        x = x.to(torch.float32)
+        # HACK: to use scheduler, we never assume NC with C
+        x = rearrange(x, "(B NC) C T ... -> B (C NC) T ...", NC=NC)
+        return x
 class ShallowEncoder(nn.Module):
     """
     Shallow encoder for encoding human-masked images.
@@ -2068,9 +2606,6 @@ class MagicDriveSTDiT3SDEBrushNet(MagicDriveSTDiT3BrushNet):
                 # Reshape to (B*NC*T, C, H, W) for 2D processing
                 x_flat = rearrange(x_inpaint_encoded, "b c t h w -> (b t) c h w")
                 
-                # Reshape to (B*NC*T, C, H, W) for 2D processing
-                x_flat = rearrange(x_inpaint_encoded, "b c t h w -> (b t) c h w")
-                
                 # Generate structured noise
                 input_noise = torch.randn_like(x_flat)
 
@@ -2578,6 +3113,24 @@ def MagicDriveSTDiT3_XL_2(from_pretrained=None, force_huggingface=False, **kwarg
             logging.info(f"Your model does not use any pre-trained model.")
     return model
 
+
+@MODELS.register_module("MagicDriveSTDiT3-XL/2-Pedestrian")
+def MagicDriveSTDiT3_XL_2_Pedestrian(from_pretrained=None, force_huggingface=False, **kwargs):
+    if from_pretrained is not None and not (os.path.exists(from_pretrained)):
+        model = MagicDriveSTDiT3Unconditioned.from_pretrained(from_pretrained, **kwargs)
+    else:
+        from_pretrained_pixart = kwargs.pop("from_pretrained_pixart", None)
+        config = MagicDriveSTDiT3Config(depth=28, hidden_size=1152, patch_size=(1, 2, 2), num_heads=16, **kwargs)
+        model = MagicDriveSTDiT3Unconditioned(config)
+        if from_pretrained is not None and force_huggingface:  # load from hf stdit3 model
+            load_from_stdit3_pretrained(model, from_pretrained)
+        elif from_pretrained is not None:
+            load_checkpoint(model, from_pretrained, strict=True)
+        elif from_pretrained_pixart is not None:
+            load_from_pixart_pretrained(model, from_pretrained_pixart)
+        else:
+            logging.info(f"Your model does not use any pre-trained model.")
+    return model
 
 @MODELS.register_module("MagicDriveSTDiT3-XL/2-BrushNet")
 def MagicDriveSTDiT3_XL_2_BrushNet(

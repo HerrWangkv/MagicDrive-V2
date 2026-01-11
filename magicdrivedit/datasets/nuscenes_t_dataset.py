@@ -622,16 +622,19 @@ def collate_fn_single_clip(
         human_masks = None
 
     # mask
-    if "gt_aux_bev" in examples[0] and examples[0]["gt_aux_bev"] is not None:
-        keys = ["gt_masks_bev", "gt_aux_bev"]
-        assert bbox_drop_ratio == 0, "map is not affected in bbox_drop"
+    if "gt_masks_bev" in examples[0]:
+        if "gt_aux_bev" in examples[0] and examples[0]["gt_aux_bev"] is not None:
+            keys = ["gt_masks_bev", "gt_aux_bev"]
+            assert bbox_drop_ratio == 0, "map is not affected in bbox_drop"
+        else:
+            keys = ["gt_masks_bev"]
+        # fmt: off
+        bev_map_with_aux = torch.stack([torch.from_numpy(np.concatenate([
+            example[key] for key in keys  # np array, channel-last
+        ], axis=0)).float() for example in examples], dim=0)  # float32
+        # fmt: on
     else:
-        keys = ["gt_masks_bev"]
-    # fmt: off
-    bev_map_with_aux = torch.stack([torch.from_numpy(np.concatenate([
-        example[key] for key in keys  # np array, channel-last
-    ], axis=0)).float() for example in examples], dim=0)  # float32
-    # fmt: on
+        bev_map_with_aux = None
 
     # camera param
     # TODO: camera2lidar should be changed to lidar2camera
@@ -652,7 +655,6 @@ def collate_fn_single_clip(
 
     ret_dict = {
         "pixel_values": pixel_values,
-        "bev_map_with_aux": bev_map_with_aux,
         "camera_param": camera_param,
         "camera_param_raw": {
             "int": camera_int,
@@ -660,6 +662,9 @@ def collate_fn_single_clip(
             "aug": camera_aug,
         },
     }
+    if bev_map_with_aux is not None:
+        ret_dict["bev_map_with_aux"] = bev_map_with_aux
+        
     if human_masks is not None:
         ret_dict["human_masks"] = human_masks
 
@@ -683,7 +688,7 @@ def collate_fn_single_clip(
     # 3. what is the expected output format? dict of kwargs to bbox embedder
     # TODO: should we change to frame's coordinate?
     canvas_size = pixel_values.shape[-2:]
-    if bbox_mode is not None:
+    if bbox_mode is not None and "gt_bboxes_3d" in examples[0]:
         # NOTE: both can be None
         bboxes_3d_input, bbox_view_coord = bbox_processors[int(bbox_processor_type)](
             bbox_mode, canvas_size, examples, is_train=is_train,
