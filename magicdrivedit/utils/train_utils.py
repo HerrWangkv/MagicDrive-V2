@@ -545,7 +545,6 @@ def run_unconditioned_ppd_validation(
         x = batch.pop("pixel_values").to(device, dtype)
         human_mask = batch.pop("human_masks").to(device, dtype)
         x = torch.where(human_mask > 0.5, x, torch.ones_like(x))
-        breakpoint()
         with torch.no_grad():
             z0 = sp_vae(
                 rearrange(x, "B T NC C ... -> (B NC) C T ..."),
