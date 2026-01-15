@@ -200,7 +200,7 @@ class RFlowSchedulerPPD(RFlowScheduler):
             # Reshape to (B*NC*T, C, H, W) for 2D processing
             x_flat = rearrange(x_start, "b (c nc) t h w -> (b nc t) c h w", nc = 6)# TODO: hard-coded nc=6
             input_noise = torch.randn_like(x_flat)
-            r0 = min(H, W) // 4
+            r0 = 4
             u = torch.rand(B, device=x_flat.device)
             cutoff_radius = r0 + (-torch.log(u) / 0.1)
             chunk_size = 6

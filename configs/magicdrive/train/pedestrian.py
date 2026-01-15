@@ -186,7 +186,7 @@ validation_index = [
     "1234-424-800-12-33",  # know
     # "5543-848-1600-12-33",  # know
 ]
-validation_before_run = True  # just don't use it!
+validation_before_run = False  # just don't use it!
 
 
 # Runner
