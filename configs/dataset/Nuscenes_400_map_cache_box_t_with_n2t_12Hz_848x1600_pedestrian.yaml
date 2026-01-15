@@ -11,6 +11,11 @@ dataset:
     -
       type: LoadMultiViewHumanMaskFromFiles
       to_bool: true
+    - 
+      type: PasteHighResPedestrian
+      shhq_root: "/data/SHHQ"
+      prob: 1.0
+      min_height: 40
     # -
     #   type: LoadAnnotations3D
     #   with_bbox_3d: true

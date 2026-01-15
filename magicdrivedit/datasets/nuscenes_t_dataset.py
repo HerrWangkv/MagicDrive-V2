@@ -1032,7 +1032,9 @@ class NuScenesTDataset(NuScenesDataset):
             return None
         examples = []
         first_frame_boxes = None
+        video_len = len(frames)
         for frame in frames:
+            frame["video_len"] = video_len
             self.pre_pipeline(frame)
             example = self.pipeline(frame)
             if self.filter_empty_gt and frame['is_key_frame'] and (

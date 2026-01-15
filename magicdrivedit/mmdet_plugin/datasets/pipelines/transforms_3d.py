@@ -4,6 +4,8 @@ import mmcv
 import numpy as np
 import torch
 import torchvision
+import cv2
+import secrets
 from numpy import random
 from PIL import Image
 
@@ -15,6 +17,7 @@ from ...core.bbox import (
 from mmcv import is_tuple_of
 from mmcv.utils import build_from_cfg
 from mmdet.datasets.builder import PIPELINES
+from magicdrivedit.datasets.shhq_manager import SHHQManager
 
 from ..builder import OBJECTSAMPLERS
 from .utils import noise_per_object_v3_
@@ -1345,4 +1348,64 @@ class ImageDistort:
                 img = img[..., random.permutation(3)]
             new_imgs.append(img)
         data["img"] = new_imgs
+        return data
+    
+@PIPELINES.register_module()
+class PasteHighResPedestrian:
+    def __init__(self, 
+                 shhq_root, 
+                 prob=0.5, 
+                 min_height=30, 
+                 clean_artifacts=True): 
+        # ^^^ 移除了 white_background_mode 参数
+        
+        from magicdrivedit.datasets.shhq_manager import SHHQManager
+        self.manager = SHHQManager(shhq_root, min_height=min_height, clean_artifacts=clean_artifacts)
+        
+        self.prob = prob 
+        self.min_height = min_height
+
+    def __call__(self, data):
+        imgs = data["img"]
+        video_len = data["video_len"]
+        # Video Guard: 仅允许单帧
+        if video_len > 1: 
+            return data
+            
+        if (secrets.randbelow(1000) / 1000.0) > self.prob:
+            return data
+
+        new_imgs = []
+        has_mask = "human_mask" in data
+        masks = data.get("human_mask", [None] * len(imgs))
+        new_masks = []
+
+        for img, mask in zip(imgs, masks):
+            img_np = np.array(img) 
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+            
+            # 随机生成 1-4 个行人
+            num_paste = secrets.randbelow(4) + 1
+            
+            aug_bgr, pasted_mask, _ = self.manager.paste_pedestrians(
+                img_bgr, 
+                bboxes_2d=None, 
+                num_paste=num_paste,
+            )
+            
+            aug_rgb = cv2.cvtColor(aug_bgr, cv2.COLOR_BGR2RGB)
+            new_imgs.append(Image.fromarray(aug_rgb))
+            
+            if has_mask and mask is not None:
+                mask_np = np.array(mask)
+                pasted_mask_uint8 = (pasted_mask * 255).astype(np.uint8)
+                new_mask_np = np.maximum(mask_np, pasted_mask_uint8)
+                new_masks.append(Image.fromarray(new_mask_np))
+            else:
+                new_masks.append(mask)
+        
+        data["img"] = new_imgs
+        if has_mask:
+            data["human_mask"] = new_masks
+            
         return data
